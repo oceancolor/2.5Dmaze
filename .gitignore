@@ -1,0 +1,24 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# 本地环境 / 密钥（本项目纪律：Key 只存本地代理进程，绝不入库）
+.env
+.env.*
+*.key
+*.pem
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# WorkBuddy 项目数据：只保留 memory（决策日志），其余不入库
+.workbuddy/*
+!.workbuddy/memory/
+.workbuddy/memory/*
+!.workbuddy/memory/*.md
