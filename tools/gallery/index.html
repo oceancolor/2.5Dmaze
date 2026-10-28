@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>迷宫寻宝 · 美术样张</title>
+<style>
+  :root {
+    --ink: #3B362F; --line: #5E574C; --brass: #BFA46A; --muted: #7A7064;
+    --paper: #F6F2EC; --panel: rgba(239, 233, 224, .96); --floor: #E9E1D6; --plate: #F3EDE4;
+    --font: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { background: #E4DDD2; }
+  body { margin: 0; color: var(--ink); font: 13px/1.55 var(--font); }
+  body.gray main { filter: grayscale(1); }
+  header {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+    padding: 12px 24px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: .04em; }
+  header h1 small { font-weight: 400; color: var(--muted); margin-left: 8px; font-size: 12px; }
+  .ctl { display: flex; align-items: center; gap: 8px; }
+  .ctl > span { color: var(--muted); font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); }
+  .seg button { font: inherit; border: 0; border-right: 1px solid #CDBFAD; background: var(--floor); padding: 3px 10px; cursor: pointer; color: var(--ink); }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--ink); color: #fff; }
+  label.chk { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+  main { padding: 8px 24px 64px; }
+  section { margin: 24px 0 0; }
+  section > h2 { font-size: 15px; margin: 0 0 4px; display: flex; gap: 12px; align-items: baseline; }
+  section > h2::before { content: ""; width: 16px; height: 2px; background: var(--brass); align-self: center; }
+  section > p.note { margin: 0 0 12px; color: var(--muted); max-width: 980px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+  .card { background: var(--paper); border: 1px solid #D8CDBE; padding: 8px 10px 6px; }
+  .card .pics { display: flex; gap: 10px; align-items: flex-end; }
+  .card canvas { display: block; }
+  .card .native { outline: 1px dashed #D6CBBB; }
+  .card .t { margin-top: 4px; font-weight: 600; font-size: 12px; }
+  .card .s { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .sheet { background: var(--paper); border: 1px solid #D8CDBE; padding: 10px; overflow-x: auto; }
+  .sheet canvas { display: block; }
+  .scene-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .scene { background: var(--paper); border: 1px solid #D8CDBE; padding: 10px; }
+  .scene h3 { margin: 0 0 6px; font-size: 13px; }
+  table.chk { border-collapse: collapse; background: var(--paper); font-variant-numeric: tabular-nums; }
+  table.chk td, table.chk th { border: 1px solid #DDD3C5; padding: 3px 8px; text-align: left; }
+  table.chk th { background: #EFE8DD; font-weight: 600; font-size: 12px; }
+  .ok { color: #227A43; font-weight: 600; } .bad { color: #B3261E; font-weight: 600; }
+  .sw { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; border: 1px solid var(--ink); margin-right: 6px; }
+  .pick { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pick button { font: inherit; display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); background: var(--floor); cursor: pointer; color: var(--ink); }
+  .pick button.on { border: 2px solid var(--brass); padding: 3px 9px; background: var(--plate); }
+
+  /* ---- UI 件（03 §3.10，DOM/CSS） ---- */
+  .ui-wrap { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .ui-col { display: flex; flex-direction: column; gap: 12px; }
+  .ui-cap { color: var(--muted); font-size: 11px; margin-bottom: -6px; }
+  .btn {
+    width: 200px; height: 56px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    background: #E9E1D6; border: 1px solid #5E574C; color: #3B362F; font: 600 15px var(--font); position: relative;
+  }
+  .btn.hover { background: #F3EDE4; border: 2px solid #BFA46A; }
+  .btn.down { background: #D6CBBB; } .btn.down span { transform: translateY(1px); }
+  .btn.disabled { background: #E2DFD8; border: 1px dashed #C6BCAE; color: #A29A8C; }
+  .btn.sel { border: 2px solid var(--c); }
+  .btn.sel::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: var(--c); }
+  .stam { width: 240px; height: 16px; background: #E2D9CC; border: 1px solid #5E574C; padding: 2px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
+  .stam i { display: block; background: var(--f); }
+  .stam i.off { background: transparent; }
+  .plate { width: 168px; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; background: #E9E1D6; position: relative; font: 600 13px var(--font); }
+  .plate.cur { background: #F3EDE4; }
+  .plate.cur::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c); }
+  .plate .sc { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .plate canvas { display: block; }
+  .speed { width: 132px; height: 32px; border-radius: 6px; background: rgba(42, 38, 32, .72); color: #fff; font: 600 14px var(--font); display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+  .speed-bed { padding: 12px; background: #E9E1D6; display: flex; flex-direction: column; gap: 8px; }
+  .panel {
+    width: 320px; padding: 20px 24px; background: rgba(239, 233, 224, .96); position: relative;
+    clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px);
+  }
+  .panel-frame { padding: 1px; background: #5E574C; width: max-content;
+    clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px); }
+  .panel h4 { margin: 0 0 8px; font-size: 14px; letter-spacing: .06em; }
+  .panel .gemrow { display: flex; gap: 10px; align-items: center; font-variant-numeric: tabular-nums; }
+  .panel .gemrow span { display: inline-flex; align-items: center; gap: 2px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>迷宫寻宝 · 美术样张<small>阶段 2 第 1 步 · 全部 Canvas 程序化绘制 · 规格出自 docs/03</small></h1>
+    <div class="ctl"><span>放大</span><span class="seg" id="zoom"></span></div>
+    <div class="ctl"><label class="chk"><input type="checkbox" id="gray"> 灰度检查</label></div>
+    <div class="ctl"><label class="chk"><input type="checkbox" id="anim" checked> 播放动画</label></div>
+  </header>
+  <main id="main"></main>
+  <script type="module" src="./gallery.js"></script>
+</body>
+</html>

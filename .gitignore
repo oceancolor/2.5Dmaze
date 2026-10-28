@@ -10,6 +10,14 @@ build/
 *.key
 *.pem
 
+# 美术管线中间产物（Blender 4× 原始渲染、任务清单）；成品图集在 assets/atlas/，入库
+.cache/
+__pycache__/
+*.pyc
+
+# 本地跑测试 / 校验时的临时输出（PowerShell 输出常被 CLIXML 吞，习惯写文件再读）
+npm_test.txt
+
 # 编辑器与系统
 .vscode/
 .idea/

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>迷宫寻宝 · 内核预览</title>
+<style>
+  :root {
+    --bg: #F1ECE4; --ink: #2E2A24; --muted: #7A7064; --card: #FBF8F3; --line: #DDD3C5;
+    --ok: #3FBF6A; --warn: #E9A43A; --bad: #E8384F;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 13px/1.5 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: grid; grid-template-columns: auto 400px; gap: 20px; padding: 16px;
+    align-items: start;
+  }
+  .stage { position: relative; }
+  #board { display: block; border-radius: 4px; box-shadow: 0 1px 0 #CFC4B4, 0 8px 24px rgba(60, 45, 25, .12); cursor: crosshair; }
+  .hover { position: absolute; left: 8px; bottom: 8px; background: rgba(46, 42, 36, .78); color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 12px; pointer-events: none; }
+  aside { height: calc(100vh - 32px); overflow-y: auto; padding-right: 4px; }
+  h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .02em; }
+  h2 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; letter-spacing: .08em; }
+  .sub { margin: 0 0 10px; color: var(--muted); }
+  .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+  input[type=text] { width: 120px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 3px; background: #fff; font: inherit; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid #CDBFAD; background: #fff; border-radius: 3px; cursor: pointer; color: var(--ink); }
+  button:hover { background: #F6F1EA; }
+  button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .seg { display: inline-flex; border: 1px solid #CDBFAD; border-radius: 3px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; border-right: 1px solid #E3D9CB; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--ink); color: #fff; }
+  .toggles label { margin-right: 8px; cursor: pointer; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .info { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
+  .info .big { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .info .mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); }
+  .seat { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 4px; padding: 7px 10px; margin: 6px 0; cursor: pointer; }
+  .seat.sel { outline: 2px solid var(--c); outline-offset: -1px; }
+  .seat-h { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c); display: inline-block; }
+  .chip { margin-left: auto; font-size: 11px; padding: 0 6px; border-radius: 9px; background: #EDE6DB; color: var(--muted); }
+  .chip.escaped { background: #DDF3E3; color: #227A43; }
+  .chip.failed { background: #FBE0E3; color: #A3202F; }
+  .bar { position: relative; height: 8px; background: #EAE2D6; border-radius: 4px; margin: 6px 0 3px; overflow: hidden; }
+  .bar .fill { height: 100%; border-radius: 4px; }
+  .fill.ok { background: var(--ok); } .fill.warn { background: var(--warn); } .fill.bad { background: var(--bad); }
+  .bar .mk { position: absolute; top: -2px; width: 2px; height: 12px; background: var(--ink); opacity: .55; }
+  .bar .mk2 { opacity: .25; }
+  .kv { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .kv b { color: var(--ink); }
+  .gems { display: flex; gap: 8px; align-items: center; margin: 3px 0; font-variant-numeric: tabular-nums; }
+  .gems .g { display: inline-flex; align-items: center; gap: 2px; }
+  .gems .zero { opacity: .3; }
+  .sets { margin-left: auto; font-weight: 600; }
+  .mode { font-size: 12px; }
+  ol#log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; background: var(--card); border: 1px solid var(--line); border-radius: 4px; }
+  ol#log li { padding: 2px 8px; border-bottom: 1px solid #EFE8DD; display: flex; gap: 8px; align-items: center; }
+  ol#log li .t { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; min-width: 34px; }
+  #endcard { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(251, 248, 243, .97); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px; min-width: 380px; box-shadow: 0 12px 40px rgba(60, 45, 25, .25); }
+  #endcard h3 { margin: 0 0 8px; font-size: 16px; }
+  #endcard table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  #endcard td, #endcard th { padding: 3px 6px; text-align: left; border-bottom: 1px solid #EFE8DD; }
+  #endcard th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  #verify { margin-top: 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <main class="stage">
+    <canvas id="board"></canvas>
+    <div class="hover" id="hover" hidden></div>
+    <div id="endcard" hidden></div>
+  </main>
+  <aside>
+    <h1>迷宫寻宝 · 内核预览</h1>
+    <p class="sub">阶段 1 调试视图：俯视网格，直接调用 <code>src/</code> 内核，不是最终的 2.5D 画面。四个座位都由兜底启发式 AI 操控。</p>
+
+    <div class="row">
+      <label>种子 <input type="text" id="seed" spellcheck="false"></label>
+      <button id="btnNew">新局</button>
+      <button id="btnRand">随机种子</button>
+    </div>
+    <div class="row">
+      <button id="btnPlay" class="primary">▶ 播放</button>
+      <button id="btnStep">单步 →</button>
+      <button id="btnEnd">跳到结局</button>
+      <span class="seg" id="speeds"></span>
+    </div>
+    <div class="row toggles">
+      <label><input type="checkbox" id="optTrail" checked> 轨迹</label>
+      <label><input type="checkbox" id="optPath" checked> 当前路线</label>
+      <label><input type="checkbox" id="optVision" checked> 选中座位视野</label>
+    </div>
+    <div class="legend" id="legend"></div>
+
+    <h2>对局</h2>
+    <div class="info" id="info"></div>
+
+    <h2>座位（点击切换视野）</h2>
+    <div id="seats"></div>
+
+    <h2>事件</h2>
+    <ol id="log"></ol>
+    <p class="mono" style="margin-top:8px">快捷键：空格 播放/暂停 · → 单步 · N 新局</p>
+  </aside>
+  <script type="module" src="./preview.js"></script>
+</body>
+</html>
