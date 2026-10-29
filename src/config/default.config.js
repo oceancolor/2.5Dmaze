@@ -4,7 +4,7 @@
 const DEFAULTS = {
   rulesVersion: 'SPEC-0.1',
 
-  match: { playerSeat: 0, playerMode: 'manual' }, // manual | prompt | script
+  match: { playerSeat: 0, playerMode: 'manual' }, // manual | prompt | script | byok（05 模式 B：接入玩家自己的大模型）
 
   maze: {
     size: 128,
@@ -29,7 +29,7 @@ const DEFAULTS = {
   },
 
   rules: {
-    staminaByMode: { manual: 400, prompt: 400, script: 400 },
+    staminaByMode: { manual: 400, prompt: 400, script: 400, byok: 400 },
     moveCost: 1, // 唯一的体力消耗（SPEC §2.2 不扣分原则）
     maxTurns: 600,
   },
@@ -98,6 +98,12 @@ const DEFAULTS = {
       maxOutputTokens: 200,
       repairMaxTokens: 150,
       promptSuffixMaxChars: 2000,
+      // 经服务器中转（05 §7.4）：客户端超时略短于服务器的上游超时（45 s / 90 s），由客户端判超时并修复一次。
+      // HY4 关闭思考实测（2026-10-29，经中转两局 39 次）：P50 ≈ 2.9 s、P90 ≈ 4.5 s，最慢 24.9 s、20.8 s。
+      // 客户端放弃的那次服务器照样等到上游回来、服务商照样计费；20 s 时那两次各补发一次修复，总等待反而更长（27–29 s）。
+      // 所以宁可多等：游戏在生效回合会等，放宽超时只让节奏变慢，不影响结果。
+      byokTimeoutMs: 40000,
+      byokReasoningTimeoutMs: 85000,
     },
   },
 

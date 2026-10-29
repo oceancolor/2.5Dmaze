@@ -25,6 +25,10 @@
 | U4c | **体力告警**：体力不足以走到出口时触发，**持续到该状态改变** | §7.3 事件④ |
 | U4d | 「视野内出现宝石」事件无意义，**删除** | §7.3 |
 | U4e | **体力窗口可按玩家通道不同**（亲手玩 / 用语言指挥自己的 agent 玩） | §2.1 |
+| U5 | （2026-10-29）**JS 体积预算翻倍：300 KB → 600 KB**（04 K11 子项）。总量 4 MB、首屏 1.2 MB 不变 | `tools/size-budget.mjs`、§15 |
+| U6 | （2026-10-29）**「玩家用 AI 来玩」是本游戏的核心特色**，提供两种方式：A 卷轴提示词，玩家复制到自己的长程 Agent（WorkBuddy / CodeBuddy / 豆包等），用该 Agent 的大模型来打；B 玩家提供自己的大模型 API key，由游戏在决策点询问模型。两种方式都要有**玩家思路**提示词，并能控制 AI 对思路的发散程度：**自主 / 结合 / 严格**三档。同日补充裁定：逐格决策模式先不做；不支持云端运行的 Agent；不做「关掉浏览器继续打」 | `docs/05-玩家AI代打设计.md`（设计稿 v0.2），落地后写入 §9 |
+| U7 | （2026-10-29）**最终形态 = 客户端（Web、H5、桌面）+ 服务器**。服务器记录对战数据，未来支持玩家对局（PvP）。AI 费用**谁用谁付**：服务器只中转、只记账，不替任何人付模型费用。**推翻**旧文档的「无后端、无账号、零埋点」（02 A7）和「零后端纪律、防作弊明确不做」（00、02 §8）；保留「密钥不进前端」「确定性内核 + 严格回放」「客户端零依赖」「离线可玩」 | `docs/06-多端与服务器架构.md`（设计稿 v0.2）；§12、§16 |
+| U8 | （2026-10-29）**桌面端用 Electron 壳**（不做 PWA；壳放在独立目录 `desktop/`，主仓库仍零依赖）。**对手用真模型（含 HY4）时用开局玩家自己的 key**，界面明示费用约 ×4。**域名 `aiquiz.games`（已备案）+ 自有云主机**，游戏建议用 `maze.aiquiz.games`。**账号先只做游客**，正式登录在 PvP 之前上 | 06 §5、§7.1、§8.2、§12.1、§16 |
 
 ---
 
@@ -345,6 +349,13 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 - 与 AI agent **完全同构**：同一观察、同一模板骨架、同一节奏、同一预算池。
 - 玩家只能改「人格 / 策略」段，截断到 2000 字符；不能改观察注入部分。
 
+### 9.4 玩家 AI 代打（U6）【B 已实现（M1）· A 设计中】
+
+- 两种方式：**A 外部 Agent**：卷轴提示词；对局在服务器上跑（服务器宿主），玩家电脑上的 Agent 通过服务器的 Agent 网关 `/agent/v1/*` 取局面、交决策，浏览器只观战。**B 自带模型**：对局在客户端跑；玩家的 API key 交给服务器保管，调用经服务器中转，谁用谁付。两者都复用 §7 的规划 agent：同一观察、同一决策点、同一生效时序，所以对局结果与 AI 思考快慢无关。
+- 决策契约在 §7.1 基础上加 `follow`（yes / partial / override）、`deviation`、`memo`；自主度三档（自主 / 结合 / 严格），严格档的 `override` 判为不合格。M1 实现了 `follow` / `deviation`（`memo` 随模式 A 落地）。
+- B 的规则条款（M1）：玩家通道 `playerMode: 'byok'`，体力同其他通道 400；自保闸门默认开（回不了出口的目标改为回家，记「引擎安全覆盖」，不算偏离），可关；每局调用上限可设（含修复），到上限后由启发式接着打；生效时目标已被别人拿走的合格计划记「过期」，不算不合格；玩家可随时接管 / 交还 / 换启发式代打，严格回放只读意图，不受影响。
+- 完整设计、协议、提示词草案、分期与验收：`docs/05-玩家AI代打设计.md`；服务器、多端与数据记录：`docs/06-多端与服务器架构.md`（M1 实现说明 §13.2）。
+
 ---
 
 ## 10. 节奏与表现
@@ -402,36 +413,44 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
   - `core/`、`ai/`、`record/`、`sim/`、`config/` 不读时钟、不用计时器。`tools/lint-determinism.mjs` 扫描这些目录，`npm test` 先跑它。
 - **数值**：状态全部为整数；比例比较一律用整数乘法（如 `s*10 ≤ d*13`）。
 - **哈希**：`stateHash` 对规范化 JSON（键排序）的动态状态做 FNV-1a 32 位哈希；静态地图单独算一次 `mapHash`；`configHash` 对整份 config 计算。
-- **记录格式（JSONL，`RECORD_VERSION = 1`）**【实现】阶段 1 落地的是紧凑格式：
-  - `{"t":"meta","v":1,"rulesVersion","seed","configHash","mapHash","attempts"}`
+- **记录格式（JSONL，`RECORD_VERSION = 2`；回放器同时接受 v1）**【实现】紧凑格式：
+  - `{"t":"meta","v":2,"rulesVersion","seed","configHash","mapHash","attempts","seats"?}`——`seats` 是各座位的控制通道标签（`manual` / `script` / `prompt-mock` / `mock:setHunter` / `proxy:chest` / `heuristic` …），只作复盘说明
   - `{"t":"turn","n":12,"i":"NE.-","h":"a1b2c3d4"}`——`i` 每座位一个字符：`N E S W`，`.` = STAY（无法识别的意图也记 `.`），`-` = 不在场；`h` = 本回合结算后的 `stateHash`
+  - `{"t":"plan","n":13,"seat":1,"req":11,"src":"llm","plan":{targetType,target,reason}}`——v2 新增：LLM / 提示词托管的计划**生效**行。`n` = 生效回合，`req` = 发起回合（`n − req ≥ L`），`src` ∈ `llm` / `llm-repair` / `invalid` / `failed`。严格回放不读它，只供复盘
   - `{"t":"end","n":388,"ranking":[{seat,place,champion,status,score,stamina}]}`
-  - 事件不落盘（可由回放重算）。LLM 计划行 `plan{n, seat, requestTurn, appliedTurn, plan, source}` 在阶段 3 加入，并把版本升到 2。
+  - 事件不落盘（可由回放重算）。
 - **严格回放**：只读记录，不调用任何决策者；先校验 `configHash` 与 `mapHash`，再逐回合比对哈希，不一致立即抛 `ReplayMismatch`（带回合号）。
-- **存储**：浏览器端存 IndexedDB（最近 20 局）；本地代理可选落盘。
+- **存储**：浏览器端存 IndexedDB（最近 20 局）；本地代理可选落盘。【U7 后】服务器是对战数据的权威存档：服务器宿主的对局直接入库；客户端宿主的对局结束后上传，服务器用同一内核严格回放校验（`verified` / `mismatch`）；离线对局联网后补传。IndexedDB 降为本地缓存和离线队列。详见 06 §6。**S0 已实现**（2026-10-29）：游客令牌、`POST /api/v1/matches` 上传 + 校验、离线补传、设置页「我的战绩」，实现说明见 06 §13.1。
 
 ---
 
 ## 13. 工程结构 【实现】（在 02 §4 的基础上按本规格调整）
 
 ```
+index.html  游戏入口（tools/serve.mjs 对它下发 CSP 响应头）
 src/
   config/  default.config.js
   core/    rng.js  state.js  game.js(step)  arbitrate.js  scoring.js  vision.js  observe.js  hash.js
            maze/ generate.js  validate.js  place.js
            nav/  bfs.js
-  ai/      heuristic.js  planner.js(节奏/事件/预算)  llm-client.js  codec.js
+  ai/      heuristic.js  planner.js(节奏/事件/预算/降级/自保闸门)  codec.js(载荷/提示词/解析/校验)  mock-llm.js(模拟大模型 + 风格预设)
   player/  input.js  script-host.js  sandbox-worker.js
-  render/  iso.js  renderer.js  chunk-cache.js  sprites.js  camera.js  minimap.js
-  ui/      hud.js  panels.js
+  render/  iso.js  renderer.js  chunk-cache.js  sprites.js  camera.js  atlas.js  scene.js  animator.js
+  ui/      hud.js  setup.js(开局设置)  game.css
   record/  recorder.js  replayer.js
-  app/     clock.js  scheduler.js  main.js
-proxy/     proxy.mjs  prompts/
-tools/     基于 src/core 重写的仿真；现有旧脚本保留为历史，不再扩展
+  app/     clock.js  scheduler.js  transport.js(mock / 本地代理 + 超时看门狗)  storage.js(IndexedDB：records + outbox)  sync.js(游客令牌 / 上传队列 / 我的战绩)  version.js  main.js
+server/    游戏服务器（U7，06 §13）：main.mjs  app.mjs  http.mjs  static.mjs  verifier.mjs  backup.mjs  api/  store/db.mjs
+deploy/    systemd 单元、Nginx 配置、环境变量模板（maze.aiquiz.games）
+proxy/     proxy.mjs（OpenAI 兼容转发；提示词由前端 codec 生成，代理不存模板）；M1 后由 server/llm-relay 取代
+tools/     serve.mjs(纯静态预览)  size-budget.mjs  lint-determinism.mjs  lint-isomorphic.mjs  bench.mjs …；旧脚本保留为历史，不再扩展
 tests/     *.test.mjs（node --test）
 ```
 
-- 零第三方依赖，原生 ES module，不用打包器；Node ≥ 18。
+- 共享代码（浏览器与服务器都运行，06 §3.4）：`src/core`、`src/ai`、`src/record`、`src/config`、`src/sim`、`src/app/scheduler.js`、`src/app/version.js`。由 `tools/lint-isomorphic.mjs` 守门：不得引用 DOM / 浏览器 API / Node API，只能 import 共享代码。
+
+- 与原计划的差异：`llm-client.js` 拆成 `ai/codec.js`（纯函数）+ `app/transport.js`（网络与计时器，必须在确定性 lint 范围外）；`panels.js` 并入 `ui/setup.js`；小地图未做（全图档 overview 代替）。
+
+- 零第三方依赖，原生 ES module，不用打包器；Node ≥ 22.13（服务器用内置 `node:sqlite`；浏览器端不受影响）。
 - 可选 JSDoc + `// @ts-check` 做类型检查，不引入构建步骤。
 
 ---
@@ -441,7 +460,7 @@ tests/     *.test.mjs（node --test）
 ```js
 {
   rulesVersion: 'SPEC-0.1',
-  match:    { playerSeat: 0, playerMode: 'manual' },          // manual | prompt | script
+  match:    { playerSeat: 0, playerMode: 'manual' },          // manual | prompt | script | byok（§9.4 B）
   maze: {
     size: 128, wallDensityTarget: 0.355, wallDensityTol: 0.008,
     thinKeep: 0.727,                                           // 标定值（§1.3），换生成器须重标
@@ -453,7 +472,7 @@ tests/     *.test.mjs（node --test）
   spawns: [[2,2], [125,2], [125,125], [2,125]],                // 座位 0..3，顺时针
   exits:  { positions: [[63,0], [127,63], [63,127], [0,63]],   // 与 spawns 同序配对
             spawnExitRange: [68, 108], fairnessMaxSpread: 0.35 },
-  rules:  { staminaByMode: { manual: 400, prompt: 400, script: 400 },
+  rules:  { staminaByMode: { manual: 400, prompt: 400, script: 400, byok: 400 },
             moveCost: 1,                                       // 唯一的体力消耗
             maxTurns: 600 },
   treasure: {
@@ -521,6 +540,19 @@ tests/     *.test.mjs（node --test）
 - **灰盒闸门**：
   - 阶段 1（Node）：A 确定性、B 迷宫、C 回合、D 仲裁、E 不自杀（不含 E11）、J01–J04 观察同源、计分。
   - 阶段 2（浏览器）：K04/K05/K11–K14、L11/L13；人工试玩清单沿用 04 §10。
+- **阶段 2 闸门现状**（2026-10-29）：`npm test` = 确定性 lint + 体积门禁 + 77 个用例，全部通过。
+  - K04 / K05（`tools/bench-maze.mjs --runs 1000`，Node 22）：单次生成尝试 P95 5.2 ms（≤ 20）；整局开局 createMatch P95 10.6 ms（参考）；128×128 BFS 平均 0.38 ms（≤ 1.5）。
+  - K11 / K12（`tools/size-budget.mjs`，从 index.html 沿 import 图统计）：总量 2871 / 4096 KB；JS 265 / 600 KB（U5 上调后）；图集 2586 / 3072 KB；首屏 875 / 1229 KB。
+  - K13（`tests/render.test.mjs`，假画布实测）：L2 → L1 drawOps 下降 55–62%（三个种子：35→14、27→12、29→11）。
+  - K14：注入 4 MB 后 `npm test` 退出码 1（`tests/size-budget.test.mjs` 也断言门禁在链上）。
+  - L11（`tests/render.test.mjs`）：3 个种子逐回合，过渡末帧 = 静止画面；宝物落地前在、落地后消失。
+  - L13：全新浏览器上下文打开 `http://127.0.0.1:5173`（`npm run play`）→ 1.1 s 进入可操作对局，控制台 error 0，无失败请求。设置页只在有座位选了「本地代理」时才探测代理，避免被拒连接计成 error。
+  - 待办：04 §10 人工试玩清单、O6 墙色 / O7 方向映射 A/B，需要用户试玩。
+- **服务器 S0 闸门现状**（2026-10-29）：`npm test` = 确定性 lint + 同构 lint + 体积门禁 + 85 个用例，全部通过。
+  - 06 V01 / V02 / V06 / V07：`tests/server.test.mjs`（校验器、HTTP 全流程、边界、备份、静态白名单）。
+  - 浏览器端到端（`npm run play`）：打完一局 → 结算卡「记录已上传 · 服务器严格回放校验通过」→ 设置页战绩可见；断网打完 → 进本机队列 → 恢复网络后自动补传并校验通过；静态预览下如实提示「只存本机」。三条路径控制台 0 error。
+  - L13 在服务器模式下复测：0.66 s 进入可操作对局，0 error。
+  - K11 / K12：JS 277 / 600 KB，首屏 888 / 1229 KB（新增 sync.js / version.js）。
 
 ---
 
@@ -536,7 +568,10 @@ tests/     *.test.mjs（node --test）
 | O6 | 墙色 A / B | A | 灰盒闸门，用户选 |
 | O7 | 手动方向映射 | 网格方向 | 灰盒 A/B |
 | O8 | 各通道的时长门禁 | 2× 观战 P95 ≤ 90 s | 灰盒试玩 |
-| O9 | HY4 的 baseURL（含 /v1）、model id、鉴权头 | 用 mock | 阶段 3 前 |
+| O9 | HY4 的 baseURL（含 /v1）、model id、鉴权头 | 用 mock；本地代理已按 OpenAI 兼容格式就绪（`Authorization: Bearer`），拿到凭证填 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL` 即可。U7 后 HY4 作为服务器中转里的一个服务商预设，费用由选用它的玩家自己承担 | 阶段 3 前 |
+| O11 | 服务器部署 | **已定（U8 + 06 Q16–Q18）**：域名 `maze.aiquiz.games` + 自有云主机（起步 2 核 4 GB），账号先游客；桌面先 Windows。云主机地域与系统在第一次部署时确认 | ✓ |
+| R6 | 共享代码（core / ai / record / scheduler）要同时跑在浏览器和 Node：一旦混进 DOM 或环境相关代码，客户端与服务器结果就会分叉 | S0 加同构 lint，S1 加 V08（两端记录逐字节一致） | 06 §3.4 |
+| R7 | 服务器中转可能被滥用成公共代理，自定义地址存在 SSRF 风险 | 只接受「本人、进行中对局」的请求；HTTPS + 拒绝内网地址；限频 | 06 §7.3 |
 | O10 | **成套加分几乎拿不到**（见 R5）：要不要调宝石数 / 间距 / 体力，让成套成为真实可追求的目标 | 维持现状 | 需用户决定；灰盒试玩前给出几组仿真对照 |
 | R1 | 堵人零成本 → 骚扰、僵局 | AI 解锁 + maxTurns 兜底；阶段 1：AI 之间零卡死 | 灰盒监控真人堵人 |
 | R2 | 停留免费 → 局长拖向 600 | 阶段 1：回合 P50 375 / P95 418 / max 492，无人触及 600 | 灰盒监控真人 |

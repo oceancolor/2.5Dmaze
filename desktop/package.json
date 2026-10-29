@@ -1,0 +1,26 @@
+{
+  "name": "maze-quest-desktop",
+  "productName": "迷宫寻宝",
+  "version": "0.3.0",
+  "private": true,
+  "description": "迷宫寻宝 · 桌面端（Electron 壳，docs/06 §8.2）。网页代码与 Web 版同一份，打包时原样拷进安装包。",
+  "main": "main.mjs",
+  "scripts": {
+    "dev": "electron . --server=http://127.0.0.1:5173",
+    "start": "electron .",
+    "stage": "node tools/stage.mjs",
+    "dist": "node tools/stage.mjs && electron-builder --config builder.config.cjs --win nsis",
+    "dist:dir": "node tools/stage.mjs && electron-builder --config builder.config.cjs --win dir",
+    "icon": "python tools/make-icon.py",
+    "test": "node --test",
+    "e2e": "node tools/e2e.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  },
+  "devDependencies": {
+    "electron": "44.10.0",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.58.2"
+  }
+}

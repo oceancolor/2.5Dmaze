@@ -3,7 +3,27 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { lintSource, lintRepo } from '../tools/lint-determinism.mjs';
+import * as iso from '../tools/lint-isomorphic.mjs';
 import { makeConfig, DEFAULT_CONFIG, staminaFor } from '../src/config/default.config.js';
+
+test('同构 lint（06 §3.4）：共享代码抓 DOM / 浏览器 API / Node API / 越界 import；仓库当前 0 违规', () => {
+  assert.equal(iso.lintSource('src/core/x.js', 'const w = window.innerWidth;').length, 1);
+  assert.equal(iso.lintSource('src/ai/x.js', 'document.body.append(el);').length, 1);
+  assert.equal(iso.lintSource('src/ai/x.js', 'const r = await fetch(url);').length, 1);
+  assert.equal(iso.lintSource('src/record/x.js', 'localStorage.setItem(k, v);').length, 1);
+  assert.equal(iso.lintSource('src/core/x.js', 'const b = Buffer.from(s);').length, 1);
+  assert.equal(iso.lintSource('src/core/x.js', 'if (process.env.X) {}').length, 1);
+  assert.equal(iso.lintSource('src/core/x.js', "import fs from 'node:fs';").length, 1);
+  assert.equal(iso.lintSource('src/ai/x.js', "import { h } from '../ui/hud.js';").length, 1);
+  assert.equal(iso.lintSource('src/ai/x.js', "import { now } from '../app/clock.js';").length, 1);
+  assert.equal(iso.lintSource('src/ai/x.js', "import { step } from '../core/game.js';").length, 0);
+  assert.equal(iso.lintSource('src/app/scheduler.js', "import { createHeuristic } from '../ai/heuristic.js';").length, 0);
+  assert.equal(iso.lintSource('src/core/x.js', '// window.alert 只在注释里\nconst allocation = 1;').length, 0);
+  const root = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+  const r = iso.lintRepo(root);
+  assert.ok(r.files > 20);
+  assert.deepEqual(r.violations, []);
+});
 
 test('确定性 lint：抓 Math.random / 时钟 / 计时器，白名单与注释放行', () => {
   assert.equal(lintSource('src/core/foo.js', 'const r = Math.random();').length, 1);

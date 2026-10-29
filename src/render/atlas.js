@@ -127,7 +127,10 @@ export function createAtlas(book, { makeCanvas = S.makeCanvas } = {}) {
     icon(name, scale = 1) {
       const src = scale > 1 && book[2] ? 2 : 1;
       const c = raw(name, src);
-      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const probe = makeCanvas(c.width, c.height);
+      const pctx = probe.getContext('2d', { willReadFrequently: true });
+      pctx.drawImage(c, 0, 0);
+      const d = pctx.getImageData(0, 0, c.width, c.height).data;
       let [l, r, t, b] = [c.width, -1, c.height, -1];
       for (let y = 0; y < c.height; y++) {
         for (let x = 0; x < c.width; x++) {

@@ -3,7 +3,7 @@
 import { configHash, stateHash } from '../core/hash.js';
 import { createMatch } from '../core/state.js';
 import { step } from '../core/game.js';
-import { decodeIntents, RECORD_VERSION } from './recorder.js';
+import { decodeIntents, RECORD_VERSIONS } from './recorder.js';
 
 export class ReplayMismatch extends Error {
   constructor(message, turn, expected, actual) {
@@ -24,7 +24,7 @@ export function replay(jsonl, cfg) {
   const lines = raw.filter((l) => l && l.trim()).map((l) => JSON.parse(l));
   const meta = lines[0];
   if (!meta || meta.t !== 'meta') throw new ReplayMismatch('missing meta line', 0);
-  if (meta.v !== RECORD_VERSION) throw new ReplayMismatch(`unsupported record version ${meta.v}`, 0);
+  if (!RECORD_VERSIONS.includes(meta.v)) throw new ReplayMismatch(`unsupported record version ${meta.v}`, 0);
   const ch = configHash(cfg);
   if (meta.configHash !== ch) throw new ReplayMismatch('configHash mismatch', 0, meta.configHash, ch);
 

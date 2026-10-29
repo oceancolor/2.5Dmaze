@@ -1,15 +1,21 @@
 {
   "name": "maze-quest",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "迷宫寻宝博弈 · 零第三方依赖的确定性内核（docs/SPEC.md）",
+  "description": "迷宫寻宝博弈 · 确定性内核 + 浏览器可玩版 + 游戏服务器（游客账号 / 对局上传与重放校验）；零第三方依赖（docs/SPEC.md、docs/06）",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   },
   "scripts": {
-    "test": "node tools/lint-determinism.mjs && node --test",
+    "test": "node tools/lint-determinism.mjs && node tools/lint-isomorphic.mjs && node tools/size-budget.mjs && node --test",
+    "play": "node server/main.mjs",
+    "server": "node server/main.mjs",
+    "serve": "node tools/serve.mjs",
+    "proxy": "node proxy/proxy.mjs",
     "lint:determinism": "node tools/lint-determinism.mjs",
+    "lint:isomorphic": "node tools/lint-isomorphic.mjs",
+    "size": "node tools/size-budget.mjs",
     "calibrate": "node tools/calibrate.mjs",
     "bench": "node tools/bench.mjs"
   }

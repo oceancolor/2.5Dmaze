@@ -4,11 +4,28 @@ dist/
 build/
 *.tsbuildinfo
 
+# 桌面端打包（Electron / electron-builder）。build/ 会忽略整个目录，这里逐层取消：只把源图标入库
+!desktop/build/
+desktop/build/*
+!desktop/build/icon.ico
+!desktop/build/icon.png
+desktop/.stage/
+desktop/release/
+*.exe
+*.msi
+
 # 本地环境 / 密钥（本项目纪律：Key 只存本地代理进程，绝不入库）
 .env
 .env.*
 *.key
 *.pem
+proxy/config.local.json
+
+# 游戏服务器数据（本地开发的 SQLite：.data/maze.db 及 WAL 文件）
+.data/
+*.db
+*.db-wal
+*.db-shm
 
 # 美术管线中间产物（Blender 4× 原始渲染、任务清单）；成品图集在 assets/atlas/，入库
 .cache/

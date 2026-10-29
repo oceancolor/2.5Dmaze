@@ -1,0 +1,18 @@
+# 每日 04:00 备份 SQLite（VACUUM INTO 快照，保留 14 份）。备份目录请再同步到云主机之外（对象存储）。
+# 安装：cp deploy/maze-backup.service deploy/maze-backup.timer /etc/systemd/system/ && systemctl enable --now maze-backup.timer
+
+[Unit]
+Description=Maze Quest daily SQLite backup
+
+[Service]
+Type=oneshot
+User=maze
+Group=maze
+WorkingDirectory=/srv/maze
+EnvironmentFile=/etc/maze/maze.env
+ExecStart=/usr/bin/node server/backup.mjs /var/lib/maze/backups 14
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/maze

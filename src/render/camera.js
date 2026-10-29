@@ -5,6 +5,7 @@ import { worldBounds } from './iso.js';
 
 export function createCamera({ zoomLevels, size, tau = 90 }) {
   const wb = worldBounds(size);
+  const last = zoomLevels.length - 1;
   let zi = 0;
   let x = 0;
   let y = 0;
@@ -12,6 +13,7 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
   let ty = 0;
   let snapped = false;
   let free = false;
+  let fit = zoomLevels[last];
 
   const clampX = (v) => Math.min(wb.maxX, Math.max(wb.minX, v));
   const clampY = (v) => Math.min(wb.maxY, Math.max(wb.minY, v));
@@ -19,11 +21,12 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
   return {
     get x() { return x; },
     get y() { return y; },
-    get zoom() { return zoomLevels[zi]; },
+    /** 全图档的 zoom 随视口自适应：不超过配置值，且整张图放得进视口（四角 HUD 只压到图的尖角）。 */
+    get zoom() { return zi === last ? fit : zoomLevels[zi]; },
     get zoomIndex() { return zi; },
     get free() { return free; },
     /** 最小档 = 全图档（overview 位图）。 */
-    get overview() { return zi === zoomLevels.length - 1; },
+    get overview() { return zi === last; },
 
     /** 跟随目标（世界坐标）。free 时只记下目标，不动镜头。 */
     follow(wx, wy) {
@@ -35,10 +38,10 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
         snapped = true;
       }
     },
-    /** 每帧推进阻尼。viewW/viewH 为 CSS 像素视口；全图档若整图放得下就居中不动。 */
+    /** 每帧推进阻尼。viewW/viewH 为 CSS 像素视口；全图档居中不动（拖拽后可平移）。 */
     update(dt, viewW, viewH) {
-      const z = zoomLevels[zi];
-      if (this.overview && wb.width * z <= viewW && wb.height * z <= viewH) {
+      fit = Math.min(zoomLevels[last], (0.97 * viewW) / wb.width, (0.94 * viewH) / wb.height);
+      if (this.overview && !free) {
         x = (wb.minX + wb.maxX) / 2;
         y = (wb.minY + wb.maxY) / 2;
         return;
@@ -50,7 +53,7 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
     },
     /** 屏幕像素拖拽（CSS 像素）。 */
     pan(dx, dy) {
-      const z = zoomLevels[zi];
+      const z = this.zoom;
       free = true;
       x = clampX(x - dx / z);
       y = clampY(y - dy / z);

@@ -1074,7 +1074,7 @@ export function outlineRing(src, color = INK, radius = 1) {
 /** 像素级去饱和（烘焙期一次性，DEAD 帧与幽灵态用）。t=0.6 → 去 60%。 */
 export function desaturateCanvas(src, t) {
   const c = makeCanvas(src.width, src.height);
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(src, 0, 0);
   const img = x.getImageData(0, 0, c.width, c.height);
   const d = img.data;
