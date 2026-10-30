@@ -15,6 +15,7 @@ import * as S from './sprites.js';
 import { tileCenter } from './iso.js';
 import { ACTOR_COLORS, GEM_COLORS_BASE, HALO, INK, REVEAL, UI } from './palette.js';
 import { createChunkCache, bakeOverview, chunkBounds, wallSprite, GROUND_BG } from './chunk-cache.js';
+import { createEnvScene } from './env.js';
 
 export const QUALITY = Object.freeze([
   Object.freeze({ chunk: 16, hiDpi: false, wallShadows: false, deco: true }),
@@ -69,10 +70,11 @@ function gemPath(ctx, c, x, y, r) {
 }
 
 /**
- * @param {{canvas:any, map:object, cfg:object, atlas:object, makeCanvas?:(w:number,h:number)=>any}} o
- *   atlas 接口见 atlas.js（draw/frame）；makeCanvas 可注入（Node 下测试用假画布）
+ * @param {{canvas:any, map:object, cfg:object, atlas:object, envAtlas?:object, makeCanvas?:(w:number,h:number)=>any}} o
+ *   atlas 接口见 atlas.js（draw/frame/box）；envAtlas 是场外布景那套图集（非首屏，可后到）；
+ *   makeCanvas 可注入（Node 下测试用假画布）
  */
-export function createRenderer({ canvas, map, cfg, atlas, makeCanvas = S.makeCanvas }) {
+export function createRenderer({ canvas, map, cfg, atlas, envAtlas = null, makeCanvas = S.makeCanvas }) {
   const N = map.size;
   const ctx = canvas.getContext('2d');
   const isWall = (x, y) => x >= 0 && y >= 0 && x < N && y < N && map.grid[y * N + x] === 0;
@@ -90,6 +92,9 @@ export function createRenderer({ canvas, map, cfg, atlas, makeCanvas = S.makeCan
     chunks = createChunkCache({ map, atlas, makeCanvas, chunk: q.chunk, lruMax: lru, deco: q.deco, wallShadows: q.wallShadows });
   }
   makeChunks();
+
+  // 场外布景（docs/03 §15）：与地图一样只依赖尺寸与 hash，图集到货后自动生效
+  const env = createEnvScene({ atlas: envAtlas, size: N, makeCanvas });
 
   const renderScale = () => (QUALITY[quality].hiDpi ? Math.min(2, Math.max(1, dpr)) : 1);
 
@@ -319,6 +324,10 @@ export function createRenderer({ canvas, map, cfg, atlas, makeCanvas = S.makeCan
       let ops = 0;
       stats.items = 0;
       stats.occluders = 0;
+      stats.env = 0;
+      const envOps = env.drawBack(ctx, s, ox, oy, W, H); // 后方树林：地图之前
+      ops += envOps;
+      stats.env += envOps;
       if (camera.overview) {
         if (!overview || overview.s !== s) {
           overview = bakeOverview({ map, atlas, makeCanvas, s });
@@ -336,6 +345,9 @@ export function createRenderer({ canvas, map, cfg, atlas, makeCanvas = S.makeCan
         stats.items = r.shown;
         stats.occluders = r.occ;
       }
+      const frontOps = env.drawFront(ctx, s, ox, oy, W, H); // 土崖 + 前方林 + 暗角：地图与角色之后
+      ops += frontOps;
+      stats.env += frontOps;
       const cs = chunks.stats();
       stats.drawOps = ops;
       stats.quality = quality;
@@ -350,6 +362,11 @@ export function createRenderer({ canvas, map, cfg, atlas, makeCanvas = S.makeCan
     invalidate() {
       chunks.clear();
       overview = null;
+    },
+
+    /** 场外布景图集到货（非首屏，晚于地图图集）。 */
+    setEnvAtlas(a) {
+      env.setAtlas(a);
     },
 
     /** 降一级（K13）。已到最低返回 false。 */

@@ -33,6 +33,8 @@ const setupRoot = document.getElementById('setup');
 const boot = document.getElementById('boot');
 
 let atlas = null;
+/** 场外布景图集（非首屏：加载失败或未到货时场外退回纯底色，地图不受影响）。 */
+let envAtlas = null;
 let game = null;
 let lastSeed = null;
 let waitSince = -1;
@@ -190,7 +192,7 @@ async function startMatch(setup, { sameSeed = false } = {}) {
   const sched = createScheduler(cfg, seed, { match, controllers: ctrls, seatLabels: seats.map((s) => s.tag), players });
   schedRef = sched;
   sched.setSpeed(setup.speed);
-  const renderer = createRenderer({ canvas, map: match.map, cfg, atlas });
+  const renderer = createRenderer({ canvas, map: match.map, cfg, atlas, envAtlas });
   renderer.resize(innerWidth, innerHeight, devicePixelRatio || 1);
   const camera = createCamera({ zoomLevels: cfg.render.zoomLevels, size: match.map.size });
   const animator = createAnimator({ map: match.map, cfg, playerSeat: sched.playerSeat });
@@ -447,6 +449,14 @@ frameLoop((t, dt) => {
     boot.textContent = `图集加载失败：${e.message}`;
     return;
   }
+  // 场外布景：非首屏，和首屏并行拉但不等它——到货后给当前渲染器换上（之后开的局直接用）；
+  // 加载失败只是场外退回纯底色（03 §15），绝不挡住开局。
+  loadAtlas({ base: '/assets/atlas/', name: 'env' })
+    .then((a) => {
+      envAtlas = a;
+      if (game) game.renderer.setEnvAtlas(a);
+    })
+    .catch((e) => console.warn('场外布景图集加载失败，场外退回纯底色', e));
   boot.hidden = true;
   const q = new URLSearchParams(location.search);
   if (q.get('seed')) setupUi.patch({ seed: q.get('seed') });

@@ -93,12 +93,36 @@ export function createAtlas(book, { makeCanvas = S.makeCanvas } = {}) {
     return c;
   }
 
+  /** 不透明像素包围盒（1×，相对锚点；t = 锚点以上的高度）。场外布景判「越不越线」与阴影宽度用。 */
+  function box(name) {
+    const key = `box|${name}`;
+    let b = cache.get(key);
+    if (b) return b;
+    const c = raw(name, 1);
+    const f = frameAt(name, 1);
+    const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
+    let [l, r, t, btm] = [c.width, -1, c.height, -1];
+    for (let y = 0; y < c.height; y++) {
+      for (let x = 0; x < c.width; x++) {
+        if (d[(y * c.width + x) * 4 + 3] <= 16) continue;
+        if (x < l) l = x;
+        if (x > r) r = x;
+        if (y < t) t = y;
+        if (y > btm) btm = y;
+      }
+    }
+    b = r < l ? { l: 0, r: 0, t: 0, b: 0 } : { l: l - f.ax, r: r + 1 - f.ax, t: f.ay - t, b: btm + 1 - f.ay };
+    cache.set(key, b);
+    return b;
+  }
+
   return {
     get hasHi() { return Boolean(book[2]); },
     has: (name) => name in book[1].m.frames,
     names: () => Object.keys(book[1].m.frames),
     /** 1× 帧信息 {w,h,ax,ay}。 */
     frame: (name) => frameAt(name, 1),
+    box,
     clearCache: () => cache.clear(),
 
     /** 把 sprite 锚点放到设备像素 (dx,dy)，按 s 缩放。返回 1（= 一次 drawImage，渲染统计用）。 */
