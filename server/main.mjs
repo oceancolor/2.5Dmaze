@@ -13,6 +13,8 @@
 //   MIN_CLIENT_VERSION     低于此版本的客户端上传返回 426，默认等于当前版本
 //   MASTER_KEY             「记住 key」用的主密钥（32 字节，base64 或 hex；生成：node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"）
 //                          不设时：开发模式自动生成 .data/master.key；NODE_ENV=production 下只能「仅本次会话」
+//   LLM_LOG_DIR            大模型对话日志目录，默认 .data/llm-logs（生产建议 /var/lib/maze/llm-logs）；设为 off 关闭
+//   LLM_LOG_DAYS           日志保留天数，默认 30
 // 备份：node server/backup.mjs（VACUUM INTO，运行中也可做），见 deploy/。
 
 import { createServer } from 'node:http';
@@ -23,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { openStore } from './store/db.mjs';
 import { createApp } from './app.mjs';
 import { parseMasterKey } from './vault.mjs';
+import { createLlmLog } from './llm-log.mjs';
 import { CLIENT_VERSION } from '../src/app/version.js';
 
 const root = normalize(join(fileURLToPath(new URL('.', import.meta.url)), '..'));
@@ -45,9 +48,13 @@ function loadMasterKey() {
 }
 const masterKey = loadMasterKey();
 
+const llmLogDir = env.LLM_LOG_DIR === 'off' ? null : resolve(root, env.LLM_LOG_DIR || '.data/llm-logs');
+const llmLog = createLlmLog({ dir: llmLogDir, retentionDays: Number(env.LLM_LOG_DAYS) || 30 });
+
 const store = await openStore(dbPath);
 const handle = createApp({
   store,
+  llmLog,
   root: env.SERVE_STATIC === '0' ? null : root,
   options: {
     allowedOrigins,
@@ -73,12 +80,16 @@ server.listen(port, host, () => {
   console.log(`maze server ${CLIENT_VERSION} · http://${host}:${port}/ · db ${dbPath}`);
   console.log(`public origin ${publicOrigin} · cors ${allowedOrigins.join(' ')}${env.TRUST_PROXY === '1' ? ' · trust proxy' : ''}`);
   console.log(masterKey ? 'key vault: 「记住」可用（AES-256-GCM）' : 'key vault: 未设 MASTER_KEY，只能「仅本次会话」');
+  console.log(llmLog.enabled ? `llm log: ${llmLogDir}（保留 ${Number(env.LLM_LOG_DAYS) || 30} 天）` : 'llm log: 关闭');
+  llmLog.prune().catch(() => {});
 });
 
 function shutdown() {
   server.close(() => {
-    store.close();
-    process.exit(0);
+    llmLog.flush().finally(() => {
+      store.close();
+      process.exit(0);
+    });
   });
   setTimeout(() => process.exit(0), 3000).unref();
 }

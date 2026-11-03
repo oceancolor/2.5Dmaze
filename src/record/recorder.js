@@ -1,5 +1,5 @@
 // 对局记录（JSONL，SPEC §12）。每回合一行：原始意图（紧凑串）+ 结算后状态哈希。
-//   {"t":"meta","v":2,"rulesVersion","seed","configHash","mapHash","attempts","seats"?,"players"?}
+//   {"t":"meta","v":2,"rulesVersion","seed","configHash","mapHash","attempts","seats"?,"players"?,"scripts"?}
 //   {"t":"plan","n":13,"seat":1,"req":11,"src":"llm","why":"interval","plan":{...},"err"?}   v2：计划生效行（仅供复盘，严格回放不读）
 //   {"t":"turn","n":12,"i":"NE.-","h":"a1b2c3d4"}
 //   {"t":"end","n":388,"ranking":[...]}
@@ -45,6 +45,8 @@ export function createRecorder(match, cfg, extra = {}) {
   };
   if (extra.seats) meta.seats = extra.seats.slice();
   if (extra.players && extra.players.length) meta.players = extra.players.map((p) => ({ ...p }));
+  // scripts（统一编程接口 v2）：脚本座位的说明 [{seat, name, author, origin:'human'|'agent'|'builtin', codeHash}]；代码原文不进记录
+  if (extra.scripts && extra.scripts.length) meta.scripts = extra.scripts.map((s) => ({ seat: s.seat, name: s.name, author: s.author, origin: s.origin, codeHash: s.codeHash }));
   const lines = [JSON.stringify(meta)];
   return {
     lines,

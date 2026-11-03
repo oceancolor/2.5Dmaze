@@ -6,6 +6,7 @@
 // 证明不了「意图来自谁」（人手 / 外挂 / 某个模型），见 06 §6.3。
 
 import { DEFAULT_CONFIG, makeConfig } from '../src/config/default.config.js';
+import { MAP_SIZE_IDS, matchOverrides } from '../src/config/map-sizes.js';
 import { canonicalJSON, configHash } from '../src/core/hash.js';
 import { rankActors } from '../src/core/scoring.js';
 import { RECORD_VERSIONS } from '../src/record/recorder.js';
@@ -14,14 +15,14 @@ import { HttpError } from './http.mjs';
 
 export const RULES_VERSION = DEFAULT_CONFIG.rulesVersion;
 const SEATS = DEFAULT_CONFIG.spawns.length;
-const MAX_TURNS = DEFAULT_CONFIG.rules.maxTurns;
-const MAX_LINES = MAX_TURNS * 6 + 8;
 
-/** 服务器认可的配置：每种玩家通道一份（configHash 里含 match.playerMode）。 */
-const KNOWN = new Map(Object.keys(DEFAULT_CONFIG.rules.staminaByMode).map((mode) => {
-  const cfg = makeConfig({ match: { playerMode: mode } });
-  return [configHash(cfg), { cfg, mode }];
-}));
+/** 服务器认可的配置：玩家通道 × 地图规格（configHash 含 match.playerMode 与整份尺寸参数）。XL 与引入规格前同一个哈希。 */
+const KNOWN = new Map(Object.keys(DEFAULT_CONFIG.rules.staminaByMode).flatMap((mode) => MAP_SIZE_IDS.map((mapSize) => {
+  const cfg = makeConfig(matchOverrides(mode, mapSize));
+  return [configHash(cfg), { cfg, mode, mapSize }];
+})));
+const MAX_TURNS = Math.max(...[...KNOWN.values()].map((k) => k.cfg.rules.maxTurns));
+const MAX_LINES = MAX_TURNS * 6 + 8;
 
 const HEX8 = /^[0-9a-f]{8}$/;
 const INTENTS = new RegExp(`^[NESW.\\-]{${SEATS}}$`);
@@ -36,10 +37,26 @@ const bad = (msg) => new HttpError(400, 'bad_record', `记录格式错误：${ms
 export function seatSource(tag) {
   if (!tag) return 'unknown';
   if (tag === 'manual' || tag === 'script' || tag === 'heuristic') return tag;
+  if (tag.startsWith('script:')) return 'script'; // 非玩家座位的脚本：script:<代码哈希>
   if (tag === 'prompt-mock' || tag.startsWith('mock:')) return 'mock';
   if (tag === 'prompt-proxy' || tag.startsWith('proxy:')) return 'proxy';
   if (tag === 'prompt-byok' || tag.startsWith('byok:')) return 'byok';
   return tag.split(':')[0];
+}
+
+const ORIGINS = new Set(['human', 'agent', 'builtin']);
+
+/** meta.scripts（统一编程接口 v2）：脚本座位的说明，只做形状检查（名称 / 作者是自报的展示信息）。 */
+function checkScripts(list) {
+  if (!Array.isArray(list) || list.length > SEATS) throw bad('meta.scripts');
+  const seen = new Set();
+  for (const x of list) {
+    if (!x || typeof x !== 'object' || !isInt(x.seat) || x.seat < 0 || x.seat >= SEATS || seen.has(x.seat)) throw bad('meta.scripts[].seat');
+    seen.add(x.seat);
+    for (const k of ['name', 'author']) if (typeof x[k] !== 'string' || Array.from(x[k]).length > 40) throw bad(`meta.scripts[].${k}`);
+    if (!ORIGINS.has(x.origin)) throw bad('meta.scripts[].origin');
+    if (!HEX8.test(x.codeHash)) throw bad('meta.scripts[].codeHash');
+  }
 }
 
 /** meta.players（05 §9）：玩家 AI 的说明，只做形状检查。 */
@@ -113,6 +130,7 @@ export function parseRecord(text) {
     throw bad('meta.seats');
   }
   if (meta.players !== undefined) checkPlayers(meta.players);
+  if (meta.scripts !== undefined) checkScripts(meta.scripts);
   let end = null;
   let turnCount = 0;
   for (let k = 1; k < lines.length; k++) {
@@ -143,7 +161,7 @@ export function parseRecord(text) {
 export function verifyRecord(text) {
   const { lines, meta, end } = parseRecord(text);
   const plans = lines.filter((l) => l.t === 'plan').length;
-  const base = { meta, ranking: end.ranking, turns: end.n, plans, seatPlans: planStats(lines), playerMode: null };
+  const base = { meta, ranking: end.ranking, turns: end.n, plans, seatPlans: planStats(lines), playerMode: null, mapSize: null };
 
   if (meta.rulesVersion !== RULES_VERSION) {
     return { ...base, verify: 'unverifiable', verifyTurn: null, verifyNote: `规则版本 ${meta.rulesVersion} 不是本服务器的内核版本（${RULES_VERSION}）` };
@@ -153,6 +171,7 @@ export function verifyRecord(text) {
     return { ...base, verify: 'mismatch', verifyTurn: 0, verifyNote: 'configHash 不是服务器认可的配置' };
   }
   base.playerMode = known.mode;
+  base.mapSize = known.mapSize;
   let r;
   try {
     r = replay(lines.map((l) => JSON.stringify(l)), known.cfg);

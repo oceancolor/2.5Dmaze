@@ -97,6 +97,7 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
     recordVersion: v.meta.v,
     configHash: v.meta.configHash,
     playerMode: v.playerMode,
+    mapSize: v.mapSize,
     seed: v.meta.seed,
     mapHash: v.meta.mapHash,
     turns: v.turns,

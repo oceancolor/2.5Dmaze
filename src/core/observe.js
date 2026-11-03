@@ -33,11 +33,53 @@ export function terrainPatch(map, cx, cy, P) {
 }
 
 /**
+ * 上一回合 step() 事件 → 某座位能知道的公开事件（SPEC §6.1：HUD 播报栏全场可见的那些）。
+ *   全场：拾取（谁 / 哪格 / 什么色）、开箱（结果与数值）、到达出口、出局（原因）、宝石 / 宝箱刷新
+ *   只给自己：撞墙 bump、受阻 blocked、无效意图 invalidIntent
+ *   不给：刷新顺延（内部细节）、end（obs 里本就有状态）
+ * 纯函数；不进 state，所以不影响 stateHash / 旧记录。
+ */
+export function publicEvents(events, viewer) {
+  const out = [];
+  for (const e of events || []) {
+    switch (e.type) {
+      case 'pickup':
+        out.push({ type: 'pickup', seat: e.seat, color: e.color, x: e.x, y: e.y });
+        break;
+      case 'chest':
+        out.push({ type: 'chest', seat: e.seat, x: e.x, y: e.y, kind: e.kind, value: e.value, ...(e.kind === 'stamina' ? { gained: e.gained } : {}) });
+        break;
+      case 'escaped':
+        out.push({ type: 'escaped', seat: e.seat });
+        break;
+      case 'failed':
+        out.push({ type: 'failed', seat: e.seat, reason: e.reason });
+        break;
+      case 'gemRespawn':
+        out.push({ type: 'gemRespawn', generation: e.generation });
+        break;
+      case 'chestRespawn':
+        out.push({ type: 'chestRespawn', x: e.x, y: e.y });
+        break;
+      case 'bump':
+      case 'blocked':
+      case 'invalidIntent':
+        if (e.seat === viewer) out.push(e.type === 'blocked' ? { type: 'blocked', seat: e.seat, reason: e.reason } : { type: e.type, seat: e.seat });
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+/**
  * @param {object} map
  * @param {object} state
  * @param {number} seat
  * @param {object} cfg
- * @param {{patch?: boolean}} [opts] patch=false 时省略地形窗（仿真提速用）
+ * @param {{patch?: boolean, events?: object[]|null}} [opts] patch=false 时省略地形窗（仿真提速用）；
+ *   events = 上一回合 step() 的事件，给出时附 obs.events（已按 publicEvents 过滤）
  */
 export function observe(map, state, seat, cfg, opts = {}) {
   const N = map.size;
@@ -103,5 +145,6 @@ export function observe(map, state, seat, cfg, opts = {}) {
     chest,
   };
   if (opts.patch !== false) obs.terrainPatch = terrainPatch(map, me.x, me.y, cfg.vision.terrainPatch);
+  if (opts.events) obs.events = publicEvents(opts.events, seat);
   return obs;
 }

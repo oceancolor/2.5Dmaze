@@ -109,17 +109,19 @@ export function createRelayTransport({ cfg, call, keyId, matchId, reasoning = fa
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     const t0 = now();
-    const done = (info) => {
-      clearTimeout(timer);
-      if (onCall) onCall({ seat: req.seat, kind: req.kind, source: 'relay', ms: Math.round(now() - t0), ...info });
-    };
     const body = {
       keyId, matchId, seat: req.seat, kind: req.kind, messages: messagesFor(req, cfg),
       max_tokens: req.kind === 'repair' ? L.repairMaxTokens : L.maxOutputTokens, temperature: L.temperature,
     };
+    // 导出对话用：本次请求的完整 messages 与触发信息（不含 key：客户端本来就没有 key）
+    const exchange = { id: req.id, requestTurn: req.requestTurn, appliedTurn: req.appliedTurn, why: req.why ?? null, messages: body.messages };
+    const done = (info) => {
+      clearTimeout(timer);
+      if (onCall) onCall({ seat: req.seat, kind: req.kind, source: 'relay', ms: Math.round(now() - t0), ...exchange, ...info });
+    };
     call('POST', '/llm/v1/chat', body, { signal: ctl.signal }).then((r) => {
       if (r.status === 200 && r.json) {
-        done({ ok: true, usage: r.json.usage ?? null, model: r.json.model });
+        done({ ok: true, usage: r.json.usage ?? null, model: r.json.model, finish: r.json.finish ?? null, text: String(r.json.text ?? '') });
         reply.deliver(String(r.json.text ?? ''));
         return;
       }

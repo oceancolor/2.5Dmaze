@@ -1,14 +1,19 @@
 // 开局设置（SPEC §9 玩家通道、§7 AI 对手）：
-//   你怎么玩：手打 / 脚本 Agent（JS，Worker 沙箱）/ 提示词 Agent（写风格，模拟大模型或本地代理）
-//            / 接入我的大模型（05 模式 B：key 交给游戏服务器保管，经服务器中转；思路 + 自主度 + 自保闸门 + 调用上限）
-//   对手：每个 AI 选「模拟大模型 / 大模型（本地代理）/ 启发式」+ 风格预设
+//   你怎么玩：自己手打 / 编写 Agent 脚本（统一编程接口 v2，模块 Worker）/ 接入大模型（05 模式 B，经服务器中转）
+//   脚本：名称 / 作者 / 来源（人写 · agent 写）、脚本库（新建 / 导入 / 导出 / 删除）、试运行、整局试跑（与 maze-eval 同一引擎）、复制任务书
+//   对手：每个 AI 选「模拟大模型 / 大模型（本地代理）/ 启发式 / 脚本」；脚本对手从脚本库选
 //   对局：种子（空 = 随机）、默认倍速、方向映射；代理状态探测
 // 设置存 localStorage（maze.setup.v1）。API key 绝不进 localStorage / 设置对象：只在点「保存」时从输入框读一次发给服务器，随即清空。
 
 import { PERSONAS } from '../ai/mock-llm.js';
 import { AUTONOMY, FOLLOW_ZH } from '../ai/codec.js';
 import { SCRIPT_TEMPLATE, SCRIPT_EXAMPLES } from '../player/script-host.js';
+import { BUILTINS, ORIGINS, parseHeader, withHeader } from '../player/library.js';
+import { buildBrief } from '../player/brief.js';
+import { BUDGET } from '../player/runtime/budget.js';
 import { MAPPINGS } from '../player/input.js';
+import { MAP_SIZES, MAP_SIZE_IDS, DEFAULT_MAP_SIZE, isMapSize, matchOverrides } from '../config/map-sizes.js';
+import { makeConfig } from '../config/default.config.js';
 import { ACTOR_COLORS } from '../render/palette.js';
 import { esc, frame, SEAT_NAMES, tokensText } from './hud.js';
 
@@ -18,6 +23,7 @@ export const BRAINS = Object.freeze({
   mock: '模拟大模型',
   proxy: '大模型（本地代理）',
   heuristic: '启发式',
+  script: '脚本',
 });
 
 export function defaultSetup() {
@@ -25,15 +31,19 @@ export function defaultSetup() {
     seed: '',
     speed: 2,
     mapping: 'grid',
+    mapSize: DEFAULT_MAP_SIZE,
+    evalRuns: 20,
     player: {
       mode: 'manual', code: SCRIPT_TEMPLATE, persona: PERSONAS.balanced.text, llm: 'mock',
       // 模式 B：keyId 只是服务器上那把 key 的编号（不是 key 本身）；keyMeta 只有服务商 / 模型名
       keyId: '', keyMeta: null, autonomy: 'blend', safetyGate: true, callCap: 0,
+      // 脚本（v2）：编辑器里的脚本说明；scriptId = 正在编辑的脚本库条目（'' = 未保存）；brief = 写给 agent 的要求
+      scriptName: '我的脚本', scriptAuthor: '', scriptOrigin: 'human', scriptId: '', brief: '',
     },
     opponents: [
-      { brain: 'mock', persona: 'setHunter' },
-      { brain: 'mock', persona: 'chest' },
-      { brain: 'mock', persona: 'cautious' },
+      { brain: 'mock', persona: 'setHunter', scriptId: BUILTINS[0].id },
+      { brain: 'mock', persona: 'chest', scriptId: BUILTINS[0].id },
+      { brain: 'mock', persona: 'cautious', scriptId: BUILTINS[0].id },
     ],
   };
 }
@@ -43,12 +53,16 @@ export function loadSetup() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY) || 'null');
     if (!s) return d;
-    return {
+    const out = {
       ...d,
       ...s,
       player: { ...d.player, ...(s.player || {}) },
       opponents: d.opponents.map((o, i) => ({ ...o, ...((s.opponents || [])[i] || {}) })),
     };
+    // 「提示词 Agent」已下线（内核仍认 prompt，旧记录照常校验）：存档里的 prompt 改回手打
+    if (!MODES.some((m) => m.id === out.player.mode)) out.player.mode = 'manual';
+    if (!isMapSize(out.mapSize)) out.mapSize = DEFAULT_MAP_SIZE;
+    return out;
   } catch {
     return d;
   }
@@ -64,12 +78,50 @@ export function saveSetup(s) {
 
 const MODES = [
   { id: 'manual', title: '自己手打', desc: '方向键 / WASD 每回合走一步，AI 等你；按住连走。' },
-  { id: 'script', title: '脚本 Agent', desc: '写一个 JS 函数 decide(obs, api)，在 Worker 沙箱里替你走。' },
-  { id: 'prompt', title: '提示词 Agent', desc: '用一段话描述打法，交给模拟大模型 / 本地代理规划目标，引擎负责寻路。' },
-  { id: 'byok', title: '接入我的大模型', desc: '填自己的模型 key，按你的思路代打；经游戏服务器中转，费用由你的服务商账户承担。' },
+  { id: 'script', title: '编写 Agent 脚本', desc: '写脚本（或交给你的 agent 写）替你打完一整局；人和 agent 用同一套接口、同一份信息。' },
+  { id: 'byok', title: '接入大模型', desc: '选一个大模型，按你写的思路代打；经游戏服务器中转，费用由你的服务商账户承担。' },
 ];
 
 const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
+
+/** 评测结果 Markdown → HTML（只认标题 / 表格 / 列表 / 引用 / 粗体 / 行内代码；输入先转义）。 */
+function mdToHtml(md) {
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = [];
+  let table = null;
+  let list = null;
+  const flush = () => {
+    if (table) out.push(`<table class="hist">${table.join('')}</table>`);
+    if (list) out.push(`<ul>${list.join('')}</ul>`);
+    table = null;
+    list = null;
+  };
+  for (const line of String(md).split('\n')) {
+    if (/^\|/.test(line)) {
+      if (/^\|[-| ]+\|$/.test(line)) continue;
+      const cells = line.slice(1, -1).split('|').map((c) => c.trim());
+      if (!table) {
+        flush();
+        table = [`<tr>${cells.map((c) => `<th>${inline(c)}</th>`).join('')}</tr>`];
+      } else table.push(`<tr>${cells.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`);
+      continue;
+    }
+    if (/^- /.test(line)) {
+      if (!list) {
+        flush();
+        list = [];
+      }
+      list.push(`<li>${inline(line.slice(2))}</li>`);
+      continue;
+    }
+    flush();
+    if (/^## /.test(line)) out.push(`<h4>${inline(line.slice(3))}</h4>`);
+    else if (/^> /.test(line)) out.push(`<p class="warn">${inline(line.slice(2))}</p>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  flush();
+  return out.join('');
+}
 
 const VERIFY = {
   verified: '<b class="ok">✓ 校验通过</b>',
@@ -111,14 +163,18 @@ function historyView(r) {
  *          history?:()=>Promise<{ok:boolean, items?:object[], total?:number, reason?:string}>,
  *          llm?:{call:(method:string, path:string, body?:object)=>Promise<{status:number, json:object|null, reason?:string}>}}} o
  *   llm.call：带游客令牌的服务器请求（sync.call），模式 B 的 key 管理 / 测试连接 / 用量
+ *   scripts：{library, load(id) → {code,name,author,origin}, evaluate(opts) → {result, markdown}}（脚本库与整局试跑）
  */
-export function createSetup(root, { probe, trial, onStart, onResume, history, llm }) {
+export function createSetup(root, { probe, trial, onStart, onResume, history, llm, scripts = null }) {
   let s = loadSetup();
   let proxy = { ok: false, error: '未检测' };
   let probed = false;
   let canResume = false;
   let error = '';
   let trialHtml = '';
+  let evalHtml = '';
+  let evalBusy = false;
+  let libNote = '';
   let historyHtml = '<span class="k">读取中…</span>';
   // 模式 B 的界面状态（不进 localStorage；API key 输入框的值从不进这里）
   const byok = {
@@ -136,7 +192,7 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
   }
 
   // 只有选了「本地代理」才自动探测：代理没起时浏览器会把被拒的连接记成 error 级控制台日志（L13 要求冷启动 0 error）
-  const wantsProxy = () => (s.player.mode === 'prompt' && s.player.llm === 'proxy') || s.opponents.some((o) => o.brain === 'proxy');
+  const wantsProxy = () => s.opponents.some((o) => o.brain === 'proxy');
   function autoProbe() {
     if (probed || !wantsProxy()) return;
     probed = true;
@@ -162,27 +218,143 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
       return `<div class="row"><label>方向映射</label><select data-f="mapping">${Object.entries(MAPPINGS).map(([k, m]) => opt(k, m.label, s.mapping)).join('')}</select></div>
         <p class="k">等距视角下箭头键没有「正上方」的网格方向，只能二选一地转 45°（SPEC O7，灰盒 A/B）。Q / E / C / Z 永远是屏幕斜向：左上 / 右上 / 右下 / 左下。空格原地等一回合。</p>`;
     }
-    if (p.mode === 'script') {
-      return `<div class="row"><label>示例</label>
-          <select data-f="example"><option value="">— 套用示例 —</option>${opt('template', '模板：直奔出口', '')}${Object.entries(SCRIPT_EXAMPLES).map(([k, e]) => opt(k, e.label, '')).join('')}</select>
-          <span class="sp"></span><button class="btn" data-a="trial">试运行</button></div>
-        <textarea class="code" data-f="code" spellcheck="false" rows="16">${esc(p.code)}</textarea>
-        <div class="trial k" data-k="trial">${trialHtml}</div>
-        <details class="api"><summary>obs / api 速查</summary><pre>${esc(`obs.self   {seat,x,y,stamina,staminaMax,score,gems[5],sets,exit{x,y},distToExit,lowStamina,inEndgame,blockedStreak}
-obs.actors [{seat,score,stamina,gems,sets,status,visible, x,y | lastSeen{x,y,turnsSince}}]   视野切比雪夫 9
-obs.gems   [{c,color,x,y,dist}]     obs.chest {present,x,y,dist | respawnAtTurn}
-obs.turn / maxTurns / gemGeneration / gemRespawnsLeft     obs.state = 上回合 api.setState 存的值
-api.shortestStep(x,y) → 'N'|'E'|'S'|'W'|'STAY'|-1     api.distance(x,y[,fromX,fromY]) → 步数|-1
-   每回合最多 8 次；目标须是宝物 / 自己出口 / 视野内或记忆中的对手 / 视野半径内的格子，否则 -1
-api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
-限时 100 ms；连续 10 次异常切回手动，累计 5 次无效返回改为自动回家。`)}</pre></details>`;
+    if (p.mode === 'script') return scriptDetail();
+    return '';
+  }
+
+  // ───────── 编写 Agent 脚本（统一编程接口 v2，docs/07）─────────
+
+  const libEntries = () => (scripts ? scripts.library.list() : []);
+  /** 脚本选择项：内置 + 脚本库。 */
+  const scriptOptions = (cur) => [
+    ...BUILTINS.map((b) => opt(b.id, `内置 · ${b.name}`, cur)),
+    ...libEntries().map((e) => opt(e.id, `${e.name}${e.author ? ` · ${e.author}` : ''} · ${ORIGINS[e.origin] || ''}`, cur)),
+  ].join('');
+  const scriptLabel = (id) => {
+    const b = BUILTINS.find((x) => x.id === id);
+    if (b) return { name: b.name, author: b.author, origin: 'builtin' };
+    const e = scripts && scripts.library.get(id);
+    return e ? { name: e.name, author: e.author, origin: e.origin } : null;
+  };
+
+  function libraryHtml() {
+    const list = libEntries();
+    const rows = list.map((e) => `<tr><td>${esc(e.name)}</td><td>${esc(e.author || '—')}</td><td>${esc(ORIGINS[e.origin] || e.origin)}</td>
+      <td>${new Date(e.updatedAt).toLocaleString()}</td>
+      <td><button class="btn mini" data-a="libedit" data-id="${esc(e.id)}">载入编辑</button>
+        <button class="btn mini" data-a="libexport" data-id="${esc(e.id)}">导出</button>
+        <button class="btn mini" data-a="libdel" data-id="${esc(e.id)}">删除</button></td></tr>`).join('');
+    return `${list.length ? `<table class="hist"><tr><th>名称</th><th>作者</th><th>来源</th><th>更新</th><th></th></tr>${rows}</table>` : '<p class="k">还没有保存的脚本。写好后点「保存到脚本库」，或「导入 .js」载入 agent 写的脚本。</p>'}
+      <p class="k">内置：${BUILTINS.map((b) => esc(b.name)).join('、')}（可在对手座位直接选用，也可「载入编辑」改写）
+        ${BUILTINS.map((b) => `<button class="btn mini" data-a="libedit" data-id="${b.id}">载入 ${esc(b.name)}</button>`).join(' ')}</p>`;
+  }
+
+  function scriptDetail() {
+    const p = s.player;
+    const cur = p.scriptId ? scriptLabel(p.scriptId) : null;
+    return `<div class="row"><label>名称</label><input data-f="sname" value="${esc(p.scriptName)}" size="14" maxlength="40">
+        <label>作者</label><input data-f="sauthor" value="${esc(p.scriptAuthor)}" size="10" maxlength="40">
+        <label>来源</label><select data-f="sorigin">${opt('human', '人写', p.scriptOrigin)}${opt('agent', 'agent 写', p.scriptOrigin)}</select>
+        <span class="k">${cur ? `编辑中：脚本库「${esc(cur.name)}」` : '未保存到脚本库'}</span></div>
+      <div class="row"><label>示例</label>
+        <select data-f="example"><option value="">— 套用示例 —</option>${opt('template', '模板：直奔出口（v2）', '')}${Object.entries(SCRIPT_EXAMPLES).map(([k, e]) => opt(k, e.label, '')).join('')}</select>
+        <span class="sp"></span>
+        <button class="btn" data-a="trial">试运行</button>
+        <button class="btn" data-a="libsave">保存到脚本库</button>
+        <button class="btn" data-a="libimport">导入 .js</button>
+        <button class="btn" data-a="libexportcur">导出 .js</button>
+        <input type="file" accept=".js,.mjs,text/javascript" data-f="libfile" hidden></div>
+      <textarea class="code" data-f="code" spellcheck="false" rows="16">${esc(p.code)}</textarea>
+      <div class="trial k" data-k="trial">${trialHtml}</div>
+      <div class="k" data-k="libnote">${libNote}</div>
+      <details class="evalbox"${evalHtml ? ' open' : ''}><summary>整局试跑（与命令行 <code>npm run eval</code> 同一个评测）</summary>
+        <div class="row"><label>局数</label><select data-f="evalruns">${[10, 20, 50].map((n) => opt(String(n), `${n} 局`, String(s.evalRuns))).join('')}</select>
+          <span class="k">规格 ${esc(MAP_SIZES[s.mapSize].label)} · 对手按下面「对手」的设置（本地代理按启发式算）· 种子 1–N · 预算只统计不打断</span>
+          <span class="sp"></span><button class="btn brass" data-a="evalrun"${evalBusy ? ' disabled' : ''}>${evalBusy ? '试跑中…' : '开始试跑'}</button></div>
+        <div class="evalout" data-k="eval">${evalHtml}</div>
+      </details>
+      <details class="evalbox"><summary>交给我的 agent 写：任务书</summary>
+        <p class="k">把任务书粘贴给 WorkBuddy / Codex / Claude Code 等能写代码、跑命令的 agent。它会写脚本、用 <code>npm run eval</code> 反复评测，交给你一个带文件头的 .js，再在这里「导入 .js」。</p>
+        <textarea class="persona" data-f="brief" rows="4" maxlength="2000" placeholder="写给 agent 的要求，例如：优先凑套；对手比我近的宝石别去抢；XS 和 S 都要能稳定到达。">${esc(p.brief)}</textarea>
+        <div class="row"><span class="sp"></span><span class="k" data-k="briefnote"></span><button class="btn" data-a="copybrief">复制任务书</button></div>
+      </details>
+      <details class="evalbox"><summary>脚本库（${libEntries().length}）</summary><div data-k="library">${libraryHtml()}</div></details>
+      <details class="api"><summary>接口 v2 速查（完整文档 docs/07-脚本编程接口.md）</summary><pre>${esc(`function init(ctx, api)   开局一次（≤ ${BUDGET.initMs} ms，可选）；模块变量整局保留
+function decide(obs, api) 每回合一次 → 'N'|'E'|'S'|'W'|'STAY' 或 { move, intent:{type:'gem'|'chest'|'exit'|'cell', x, y, note} }
+ctx   seat size mapSize grid(Uint8Array 1=地板) spawns[4] exits[4]（四个出口都公开） rules{maxTurns,stamina,visionRadius,gemScore,setBonus,chest…}
+obs.self   {seat,x,y,stamina,staminaMax,score,gems[5],sets,exit{x,y},distToExit,lowStamina,inEndgame,blockedStreak}
+obs.actors [{seat,score,stamina,gems,sets,status,visible, x,y,lastDir | lastSeen{x,y,turnsSince}}]   视野切比雪夫 ${makeConfig().vision.entityRadius}
+obs.gems   [{c,color,x,y,dist}]     obs.chest {present,x,y,dist | respawnAtTurn}     obs.turn / maxTurns / gemGeneration / gemRespawnsLeft
+obs.events 上一回合公开事件：pickup{seat,color,x,y} chest{seat,x,y,kind,value} escaped failed{reason} gemRespawn chestRespawn；自己的 bump / blocked
+api.field(x,y[,{avoid}]) 距离场   api.dist(x,y[,fromX,fromY])   api.shortestStep(x,y[,{avoid}])   api.isFloor(x,y)   （不限次数）
+api.sim.step(belief, moves) 用真实规则推演一回合（开箱给概率分支、刷新只给标记；视野外对手需自己假设位置）
+api.random() / randInt(lo,hi) 可复现随机数（Math.random 同一个流）   api.log(...)   api.budget   api.elapsed()
+预算：每回合 ${BUDGET.baseMs} ms + 时间银行（≤ ${BUDGET.bankCapMs} ms）；超时的回合作废，沿最后的 intent 走；卡死重建并重新 init
+v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.distance / shortestStep 照常`)}</pre></details>`;
+  }
+
+  /** 整局试跑的座位配置（对手按「对手」设置；本地代理没法离线重放，按启发式算）。 */
+  async function evalSeats() {
+    const p = s.player;
+    const seats = [{ kind: 'script', code: p.code, name: p.scriptName || '我的脚本', author: p.scriptAuthor, origin: p.scriptOrigin }];
+    for (const o of s.opponents) {
+      if (o.brain === 'mock') seats.push({ kind: 'mock', persona: o.persona });
+      else if (o.brain === 'script') seats.push({ kind: 'script', ...(await scripts.load(o.scriptId || BUILTINS[0].id)) });
+      else seats.push({ kind: 'heuristic' });
     }
-    return `<div class="row"><label>大模型</label>
-        <label class="radio"><input type="radio" name="llm" value="mock"${p.llm === 'mock' ? ' checked' : ''}> 模拟大模型（离线）</label>
-        <label class="radio"><input type="radio" name="llm" value="proxy"${p.llm === 'proxy' ? ' checked' : ''}> 本地代理</label></div>
-      <div class="row chips"><label>风格预设</label>${Object.entries(PERSONAS).map(([k, v]) => `<button class="btn chip" data-persona="${k}">${esc(v.label)}</button>`).join('')}</div>
-      <textarea class="persona" data-f="persona" rows="6" maxlength="2000" placeholder="例如：先拿缺的颜色凑成套；宝箱近就顺手开；体力只够回家就回家。">${esc(p.persona)}</textarea>
-      <div class="k"><span data-k="count">${Array.from(p.persona).length}</span> / 2000 字 · 只能影响「选哪个目标」，改不了规则和观察内容；模拟大模型按关键词（保守 / 冒险 / 凑套 / 宝箱 / 不去抢）调整权重。</div>`;
+    return seats;
+  }
+
+  function paintK(k, html) {
+    const el = root.querySelector(`[data-k="${k}"]`);
+    if (el) el.innerHTML = html;
+  }
+
+  function download(filename, text) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function briefText() {
+    const cfg = makeConfig(matchOverrides('script', s.mapSize));
+    const opponents = s.opponents.map((o) => {
+      if (o.brain === 'script') {
+        const l = scriptLabel(o.scriptId);
+        return { brain: 'heuristic', label: `脚本「${l ? l.name : '?'}」（评测时可用 --seatN script:<路径>，或先用启发式）` };
+      }
+      return { brain: o.brain === 'proxy' ? 'heuristic' : o.brain, persona: o.persona, label: o.brain === 'mock' ? `模拟大模型（${PERSONAS[o.persona].label}）` : o.brain === 'proxy' ? '大模型（本地代理，评测时按启发式）' : '启发式' };
+    });
+    const rules = { stamina: cfg.rules.staminaByMode.script, maxTurns: cfg.rules.maxTurns, visionRadius: cfg.vision.entityRadius, gemScore: cfg.treasure.gemScore, setBonus: cfg.treasure.setBonus, gemRespawnMax: cfg.treasure.gemRespawnMax };
+    return buildBrief({ mapSize: s.mapSize, size: cfg.maze.size, rules, opponents, requirement: s.player.brief, name: 'my-bot' });
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function loadIntoEditor(entry, id = '') {
+    set(() => {
+      s.player.code = entry.code;
+      s.player.scriptName = entry.name || '我的脚本';
+      s.player.scriptAuthor = entry.author || '';
+      s.player.scriptOrigin = entry.origin === 'agent' ? 'agent' : 'human';
+      s.player.scriptId = id;
+    });
+    trialHtml = '';
   }
 
   // ───────── 模式 B：接入我的大模型（05 §7）─────────
@@ -299,7 +471,7 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
       <h4>你的思路</h4>
       <div class="row chips"><label>预设</label>${Object.entries(PERSONAS).map(([k, v]) => `<button class="btn chip" data-persona="${k}">${esc(v.label)}</button>`).join('')}</div>
       <textarea class="persona" data-f="persona" rows="5" maxlength="2000" placeholder="例如：先凑红黄绿三色，蓝紫看情况；宝箱只在 10 步内顺路开；对手比我近的宝石不去抢；体力剩一半就往家靠。">${esc(p.persona)}</textarea>
-      <div class="k"><span data-k="count">${Array.from(p.persona).length}</span> / 2000 字 · 只能影响取舍，改不了规则和 AI 看到的局面。思路随对局存进服务器，仅你本人可见；对局记录里只有它的哈希。</div>
+      <div class="k"><span data-k="count">${Array.from(p.persona).length}</span> / 2000 字 · 只能影响取舍，改不了规则和 AI 看到的局面。思路随对局存进服务器，仅你本人可见；对局记录里只有它的哈希。经服务器中转的对话（含思路，不含 key）会留存 30 天，用于改进游戏。</div>
       <h4>你的 AI 该多听你的</h4>
       <div class="modes">${Object.entries(AUTONOMY).map(([k, a]) => `<button class="choice${p.autonomy === k ? ' on' : ''}" data-autonomy="${k}"><b>${a.label}</b><span>${a.short}</span></button>`).join('')}</div>
       <div class="row"><label class="radio"><input type="checkbox" data-f="risk"${p.safetyGate ? '' : ' checked'}> 允许冒险（关闭自保闸门）</label>
@@ -373,19 +545,31 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
           <b>${m.title}</b><span>${m.desc}</span></button>`).join('')}</div>
         <div class="detail">${detail()}</div>
       </section>
+      <section><h3>地图大小</h3>
+        <div class="modes sizes">${MAP_SIZE_IDS.map((id) => {
+          const z = MAP_SIZES[id];
+          return `<button class="choice${s.mapSize === id ? ' on' : ''}" data-size="${id}"><b>${z.label}</b><span>体力 ${z.stamina} · 上限 ${z.maxTurns} 回合</span></button>`;
+        }).join('')}</div>
+      </section>
       <section><h3>对手</h3>
         <div class="opps">${s.opponents.map((o, k) => {
           const seat = k + 1;
-          return `<div class="opp" style="--c:${ACTOR_COLORS[seat]}"><span class="nm">${SEAT_NAMES[seat]}</span>
-            <select data-opp="${k}" data-f="brain">${Object.entries(BRAINS).map(([v, l]) => opt(v, l, o.brain)).join('')}</select>
+          const brainSel = `<select data-opp="${k}" data-f="brain">${Object.entries(BRAINS).map(([v, l]) => opt(v, l, o.brain)).join('')}</select>`;
+          if (o.brain === 'script') {
+            const l = scriptLabel(o.scriptId) || scriptLabel(BUILTINS[0].id);
+            return `<div class="opp" style="--c:${ACTOR_COLORS[seat]}"><span class="nm">${SEAT_NAMES[seat]}</span>${brainSel}
+              <select data-opp="${k}" data-f="oscript">${scriptOptions(o.scriptId || BUILTINS[0].id)}</select>
+              <span class="k">${esc(l.name)}${l.author ? ` · ${esc(l.author)}` : ''} · ${esc(ORIGINS[l.origin] || '')} · 和你同一套接口与规则</span></div>`;
+          }
+          return `<div class="opp" style="--c:${ACTOR_COLORS[seat]}"><span class="nm">${SEAT_NAMES[seat]}</span>${brainSel}
             <select data-opp="${k}" data-f="opersona"${o.brain === 'heuristic' ? ' disabled' : ''}>${Object.entries(PERSONAS).map(([v, l]) => opt(v, l.label, o.persona)).join('')}</select>
             <span class="k">${o.brain === 'heuristic' ? '按距离贪心、自带让行解锁' : esc(PERSONAS[o.persona].text)}</span></div>`;
         }).join('')}</div>
       </section>
-      <section><h3>大模型代理 <button class="btn mini" data-a="probe">重新检测</button></h3>
+      ${wantsProxy() ? `<section><h3>对手用的大模型代理 <button class="btn mini" data-a="probe">重新检测</button></h3>
         <p class="proxy">${proxyLine()}</p>
         <p class="k">在项目目录运行 <code>npm run proxy</code>（先设 <code>LLM_BASE_URL</code> <code>LLM_API_KEY</code> <code>LLM_MODEL</code>，任何 OpenAI 兼容端点均可）。密钥只在代理进程里，页面拿不到。</p>
-      </section>
+      </section>` : ''}
       <section><h3>我的战绩 <button class="btn mini" data-a="history">刷新</button></h3>
         <div class="history" data-k="history">${historyHtml}</div>
       </section>
@@ -410,6 +594,11 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
   root.addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (b.dataset.size && isMapSize(b.dataset.size)) {
+      set(() => { s.mapSize = b.dataset.size; });
+      root.querySelectorAll('[data-size]').forEach((x) => x.classList.toggle('on', x === b));
+      return;
+    }
     if (b.dataset.mode) {
       set(() => { s.player.mode = b.dataset.mode; });
       render();
@@ -445,10 +634,75 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
       paint();
       const r = await trial(s.player.code, s.seed);
       const logs = r.logs && r.logs.length ? `<br>${r.logs.map(esc).join('<br>')}` : '';
+      const it = r.intent ? ` · 意图 ${esc(r.intent.type)} (${r.intent.x}, ${r.intent.y})${r.intent.note ? ` ${esc(r.intent.note)}` : ''}` : '';
       trialHtml = r.ok
-        ? `<b class="ok">通过</b> · 第 1 回合返回 <code>${esc(r.dir)}</code> · 耗时 ${r.ms.toFixed(1)} ms · 寻路调用 ${r.nav}${r.denied ? `（越权 / 超额 ${r.denied}）` : ''}${logs}`
+        ? `<b class="ok">通过</b> · 第 1 回合返回 <code>${esc(r.dir)}</code>${it} · decide ${r.ms.toFixed(1)} ms · init ${(r.initMs ?? 0).toFixed(1)} ms${r.skipped ? ` · ${esc(r.skipped)}` : ''}${r.warn ? ` · <span class="warn">${esc(r.warn)}</span>` : ''}${logs}`
         : `<b class="bad">失败</b> · ${esc(r.error)}${logs}`;
       paint();
+    } else if (b.dataset.a === 'evalrun' && scripts) {
+      evalBusy = true;
+      evalHtml = '<span class="k">准备中…</span>';
+      b.disabled = true;
+      b.textContent = '试跑中…';
+      paintK('eval', evalHtml);
+      try {
+        const seats = await evalSeats();
+        const { markdown } = await scripts.evaluate({
+          size: s.mapSize, seeds: `1-${s.evalRuns}`, seats,
+          onProgress: (d, t) => paintK('eval', `<span class="k">试跑中 ${d} / ${t} 局…</span>`),
+        });
+        evalHtml = mdToHtml(markdown);
+      } catch (err) {
+        evalHtml = `<b class="bad">试跑失败</b> · ${esc(err.message)}`;
+      }
+      evalBusy = false;
+      b.disabled = false;
+      b.textContent = '开始试跑';
+      paintK('eval', evalHtml);
+    } else if (b.dataset.a === 'copybrief') {
+      const ok = await copyText(briefText());
+      paintK('briefnote', ok ? '<b class="ok">已复制</b>，粘贴给你的 agent' : '<b class="bad">复制失败</b>');
+    } else if (b.dataset.a === 'libsave' && scripts) {
+      const p = s.player;
+      const r = scripts.library.save({ id: p.scriptId || undefined, name: p.scriptName, author: p.scriptAuthor, origin: p.scriptOrigin, code: p.code });
+      libNote = r.error ? `<b class="bad">${esc(r.error)}</b>` : `<b class="ok">已保存</b>「${esc(r.name)}」，可在对手座位选用`;
+      if (!r.error) set(() => { s.player.scriptId = r.id; });
+      render();
+    } else if (b.dataset.a === 'libimport') {
+      root.querySelector('[data-f="libfile"]').click();
+    } else if (b.dataset.a === 'libexportcur' && scripts) {
+      const p = s.player;
+      const x = scripts.library.exportText({ name: p.scriptName, author: p.scriptAuthor, origin: p.scriptOrigin, code: p.code });
+      download(x.filename, x.text);
+    } else if (b.dataset.a === 'libedit' && scripts) {
+      const id = b.dataset.id;
+      try {
+        const e = await scripts.load(id);
+        const builtin = BUILTINS.some((x) => x.id === id);
+        // 内置脚本载入后是你的副本（不改内置本身）
+        loadIntoEditor(builtin ? { ...e, name: `${e.name}（副本）`, author: '', origin: 'human' } : e, builtin ? '' : id);
+        libNote = `已载入「${esc(e.name)}」`;
+      } catch (err) {
+        libNote = `<b class="bad">${esc(err.message)}</b>`;
+      }
+      render();
+    } else if (b.dataset.a === 'libexport' && scripts) {
+      const e = scripts.library.get(b.dataset.id);
+      if (e) {
+        const x = scripts.library.exportText(e);
+        download(x.filename, x.text);
+      }
+    } else if (b.dataset.a === 'libdel' && scripts) {
+      const e = scripts.library.get(b.dataset.id);
+      if (e && confirm(`删除脚本「${e.name}」？`)) {
+        scripts.library.remove(e.id);
+        set(() => {
+          if (s.player.scriptId === e.id) s.player.scriptId = '';
+          for (const o of s.opponents) if (o.scriptId === e.id) o.scriptId = BUILTINS[0].id;
+        });
+        libNote = `已删除「${esc(e.name)}」`;
+        render();
+      }
     } else if (b.dataset.a === 'history') {
       historyHtml = '<span class="k">读取中…</span>';
       const el = root.querySelector('[data-k="history"]');
@@ -470,6 +724,9 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
   root.addEventListener('input', (e) => {
     const f = e.target.dataset.f;
     if (f === 'code') set(() => { s.player.code = e.target.value; });
+    else if (f === 'sname') set(() => { s.player.scriptName = e.target.value; });
+    else if (f === 'sauthor') set(() => { s.player.scriptAuthor = e.target.value; });
+    else if (f === 'brief') set(() => { s.player.brief = e.target.value; });
     else if (f === 'persona') {
       set(() => { s.player.persona = e.target.value; });
       const c = root.querySelector('[data-k="count"]');
@@ -486,10 +743,7 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
   root.addEventListener('change', (e) => {
     const t = e.target;
     const f = t.dataset.f;
-    if (t.name === 'llm') {
-      set(() => { s.player.llm = t.value; });
-      autoProbe();
-    } else if (t.name === 'keysel') {
+    if (t.name === 'keysel') {
       selectKey(byok.keys.find((k) => k.keyId === t.value) || null);
       root.querySelectorAll('.keyrow').forEach((r) => r.classList.toggle('on', r.contains(t)));
     } else if (f === 'kprovider') {
@@ -509,8 +763,28 @@ api.isFloor(x,y)  api.size  api.setState(v ≤16KB)  api.log(...)
     } else if (f === 'opersona') {
       set(() => { s.opponents[Number(t.dataset.opp)].persona = t.value; });
       render();
+    } else if (f === 'oscript') {
+      set(() => { s.opponents[Number(t.dataset.opp)].scriptId = t.value; });
+      render();
+    } else if (f === 'sorigin') set(() => { s.player.scriptOrigin = t.value === 'agent' ? 'agent' : 'human'; });
+    else if (f === 'evalruns') set(() => { s.evalRuns = Number(t.value) || 20; });
+    else if (f === 'libfile' && t.files && t.files[0] && scripts) {
+      const file = t.files[0];
+      file.text().then((text) => {
+        const r = scripts.library.importText(text, file.name);
+        if (r.error) libNote = `<b class="bad">导入失败：${esc(r.error)}</b>`;
+        else {
+          loadIntoEditor(r, r.id);
+          const h = parseHeader(text);
+          libNote = `<b class="ok">已导入</b>「${esc(r.name)}」${h.name ? '' : '（没有文件头，按文件名命名）'}，已存进脚本库`;
+        }
+        render();
+      });
     } else if (f === 'example' && t.value) {
-      set(() => { s.player.code = t.value === 'template' ? SCRIPT_TEMPLATE : SCRIPT_EXAMPLES[t.value].code; });
+      set(() => {
+        s.player.code = t.value === 'template' ? SCRIPT_TEMPLATE : SCRIPT_EXAMPLES[t.value].code;
+        s.player.scriptId = '';
+      });
       trialHtml = '';
       render();
     }

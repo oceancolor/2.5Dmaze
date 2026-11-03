@@ -75,6 +75,8 @@ export function buildPayload(map, obs, cfg) {
     },
     rivals: obs.actors.map((o) => {
       const r = { seat: o.seat, status: o.status, score: o.score, stamina: o.stamina, sets: o.sets, gems: named(o.gems), visible: o.visible };
+      const ex = map.exits[o.seat];
+      if (ex) r.exit = { x: ex[0], y: ex[1] }; // 出口位置是公开信息（与脚本 ctx.exits 一致）
       if (o.visible) {
         r.x = o.x;
         r.y = o.y;
@@ -91,19 +93,27 @@ export function buildPayload(map, obs, cfg) {
     gemRespawnsLeft: obs.gemRespawnsLeft,
   };
   if (obs.terrainPatch) p.terrain = { originX: obs.terrainPatch.originX, originY: obs.terrainPatch.originY, rows: obs.terrainPatch.rows };
+  // 上一回合的公开事件（拾取 / 开箱 / 到达 / 出局 / 刷新）；颜色换成名字，省掉自己的撞墙受阻
+  if (obs.events && obs.events.length) {
+    const ev = obs.events
+      .filter((e) => e.type !== 'bump' && e.type !== 'invalidIntent')
+      .map((e) => (e.type === 'pickup' ? { ...e, color: colors[e.color] } : e));
+    if (ev.length) p.events = ev;
+  }
   return p;
 }
 
 function rulesLines(payload, cfg) {
   const T = cfg.treasure;
   return [
-    `你在玩 128×128 网格迷宫寻宝，控制座位 ${payload.self.seat} 的小机器人。四人同时行动，每回合各走一格。`,
+    `你在玩 ${cfg.maze.size}×${cfg.maze.size} 网格迷宫寻宝，控制座位 ${payload.self.seat} 的小机器人。四人同时行动，每回合各走一格。`,
     '规则：',
     `- 方向 N=y−1、E=x+1、S=y+1、W=x−1。只有成功移动扣 1 体力；体力归零出局、分数作废；第 ${payload.maxTurns} 回合仍未到出口也出局。`,
     '- 只有到达自己的出口才算成绩，冠军在到达者中按分数决出。',
     `- 计分 = 宝石数×${T.gemScore} + 成套数×${T.setBonus}（成套 = 五色各一颗）+ 宝箱分。宝箱随机给 ${T.chest.scoreRange.join('–')} 分或 ${T.chest.staminaRange.join('–')} 体力。`,
     `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。对手只在切比雪夫距离 ${cfg.vision.entityRadius} 内可见，宝石 / 宝箱位置全公开。`,
     '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 视野内比你更近的对手座位。',
+    '- rivals[].exit 是对手的出口（公开）；events 是上一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新）。',
     '- 务必保证 stamina ≥ dist + back，并留余量；体力只够回家时选 exit。',
   ];
 }

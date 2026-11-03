@@ -19,9 +19,10 @@ export const SEAT_NAMES = Object.freeze(['你', 'AI-A', 'AI-B', 'AI-C']);
 const HOME_COLORS = { ok: '#3FBF6A', warn: '#F2CE3B', bad: '#E8384F' };
 const SOURCE_ZH = {
   llm: '大模型计划', 'llm-repair': '大模型计划（修复后）', guard: '引擎安全覆盖：回家', heuristic: '启发式', l3: '启发式（大模型熔断）',
-  script: '脚本', 'auto-home': '引擎接管 · 自动回家', manual: '已切回手动', 'script-error': '脚本异常', 'script-invalid': '返回值无效',
+  script: '脚本', 'auto-home': '引擎接管 · 自动回家', manual: '已切回手动', 'script-error': '脚本异常 · 沿意图兜底', 'script-invalid': '返回值无效 · 沿意图兜底',
+  'script-timeout': '超时 · 沿意图兜底', 'manual-pending': '等待切回手动',
 };
-const TARGET_ZH = { gem: '宝石', chest: '宝箱', exit: '出口' };
+const TARGET_ZH = { gem: '宝石', chest: '宝箱', exit: '出口', cell: '格子' };
 const FOLLOW_CHIP = { yes: 'ok', partial: 'warn', override: 'bad' };
 /** 连续多少次不合格亮黄灯（05 §4，agent.maxInvalidStreak）。 */
 const WARN_STREAK = 3;
@@ -128,6 +129,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
     else if (a === 'same') actions.newMatch('same');
     else if (a === 'verify') root.querySelector('[data-k="verify"]').textContent = actions.verify();
     else if (a === 'download') actions.download();
+    else if (a === 'talk') actions.exportTalk();
     else if (a === 'takeover') actions.takeOver();
     else if (a === 'handback') actions.handBack();
     else if (a === 'useheur') actions.useHeuristic();
@@ -242,6 +244,21 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
     }).join('');
   }
 
+  /** 结算卡：各脚本座位（名称 / 作者 / 来源 / 预算 / 异常）。对局结束才显示，信息边界与观战一致。 */
+  function scriptReport(sched) {
+    const lines = [];
+    sched.controllers.forEach((c, i) => {
+      const meta = seats[i] && seats[i].script;
+      if (!meta || !c || !c.report) return;
+      const r = c.report();
+      const t = r.timing || {};
+      lines.push(`<li>${dot(i)}${SEAT_NAMES[i]} · 脚本「${esc(meta.name)}」${meta.author ? ` · ${esc(meta.author)}` : ''} · ${esc(seats[i].persona || '')}
+        · 每回合 P50 ${(t.p50 ?? 0).toFixed(1)} / P95 ${(t.p95 ?? 0).toFixed(1)} / 最长 ${(t.max ?? 0).toFixed(1)} ms · init ${r.initMs} ms
+        ${r.timeouts ? ` · <span class="warn">超时 ${r.timeouts} 回合（沿意图兜底）</span>` : ''}${r.hard ? ` · 硬异常 ${r.hard}` : ''}${r.soft ? ` · 软异常 ${r.soft}` : ''}${r.resets ? ` · 重建 ${r.resets}` : ''}</li>`);
+    });
+    return lines.length ? `<ul class="scripts k">${lines.join('')}</ul>` : '';
+  }
+
   return {
     /** 每帧调用；只在可见量变化时改 DOM。player：玩家座位的规划 agent（提示词 / 我的大模型），接管后仍从它读状态。 */
     update(sched, { follow, mapping, zoomIndex, waitMs, quality, poolStats, player = null }) {
@@ -324,7 +341,8 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
           if (ctl) ctl.innerHTML = s.ended || me.status !== 'active' ? '' : aiControls(ast, player);
         } else if (!kind) agent.innerHTML = '<span class="bad">已切回手动操作</span>';
         else if (st) {
-          const extra = st.counts ? ` · 硬异常 ${st.counts.hard}（连续 ${st.counts.hardStreak}）· 软异常 ${st.counts.soft} · 平均 ${st.counts.avgMs.toFixed(1)} ms` : '';
+          const c = st.counts;
+          const extra = c ? ` · 硬异常 ${c.hard}（连续 ${c.hardStreak}）· 软异常 ${c.soft}${c.timeouts ? ` · 超时 ${c.timeouts}` : ''}${c.resets ? ` · 重建 ${c.resets}` : ''} · 平均 ${c.avgMs.toFixed(1)} ms${c.bankMs !== undefined ? ` · 时间银行 ${c.bankMs} ms` : ''}` : '';
           const stats = st.stats ? ` · 调用 ${st.stats.requests} · 修复 ${st.stats.repairs} · 自保 ${st.stats.guard}` : '';
           agent.innerHTML = `${st.thinking ? '<em class="think">思考中</em> ' : ''}${planText(st) || esc(SOURCE_ZH[st.source] ?? st.source)}<div class="k">${extra}${stats}</div>`;
         }
@@ -356,7 +374,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       else {
         const m = MAPPINGS[mapping];
         const arrows = `↑${m.up} →${m.right} ↓${m.down} ←${m.left}`;
-        hint.innerHTML = `${waitMs > 600 ? `<b class="you">${dot(sched.playerSeat)}轮到你</b> · ` : ''}方向键 / WASD（${arrows}）· Q E C Z 斜向 · 空格原地等 · 按住连走`;
+        hint.innerHTML = `${waitMs > 600 ? `<b class="you">${dot(sched.playerSeat)}轮到你</b> · ` : ''}方向键 / WASD（${arrows}）· Q E C Z 斜向 · 空格原地等 · 按住连走 · Tab 小地图`;
       }
       hint.hidden = !hint.textContent;
     },
@@ -390,10 +408,11 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
 
     /** 脚本异常 / 降级事件。 */
     agentEvent(e) {
-      if (e.type === 'hard' || e.type === 'soft') {
-        agentNotes[e.type]++;
+      const KIND = { hard: '硬异常', soft: '软异常', timeout: '超时', reset: '重建', warn: '提示' };
+      if (KIND[e.type]) {
+        if (e.type === 'hard' || e.type === 'soft') agentNotes[e.type]++;
         if (consoleEl) {
-          consoleEl.prepend(el('li', 'err', `<span class="t">T${e.turn}</span>${e.type === 'hard' ? '硬异常' : '软异常'}：${esc(e.error)}`));
+          consoleEl.prepend(el('li', e.type === 'warn' ? '' : 'err', `<span class="t">T${e.turn}</span>${KIND[e.type]}：${esc(e.error)}`));
           while (consoleEl.children.length > 6) consoleEl.lastChild.remove();
         }
       } else if (e.type === 'degrade') {
@@ -433,8 +452,9 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
             <td>${r.status === 'escaped' ? `到达（T${a.escapedTurn}）` : a.failReason === 'stamina' ? '体力耗尽' : '回合上限'}</td>
             <td><b>${r.score}</b></td><td class="k">宝石 ${gemTotal(a.gems) * T.gemScore} + 成套 ${T.setBonus * setsOf(a.gems)} + 宝箱 ${a.chestScore}</td><td>${r.stamina}</td></tr>`;
         }).join('')}</table>
+        ${scriptReport(sched)}
         ${mine ? reportHtml(mine) : ''}
-        <div class="btns"><button class="btn" data-a="verify">校验严格回放</button><button class="btn" data-a="download">下载记录 JSONL</button>
+        <div class="btns"><button class="btn" data-a="verify">校验严格回放</button><button class="btn" data-a="download">下载记录 JSONL</button>${mine ? '<button class="btn" data-a="talk" title="本局你的 AI 每次请求 / 回复与结局（不含 key）">导出 AI 对话</button>' : ''}
           <button class="btn" data-a="same">同一张图再来</button><button class="btn" data-a="setup">改设置</button><button class="btn brass" data-a="again">再来一局（N）</button></div>
         <div class="k" data-k="verify"></div>
         <div class="k sync" data-k="sync">${esc(syncLine)}</div>`, 'lg');

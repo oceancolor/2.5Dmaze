@@ -121,6 +121,9 @@ const MIGRATIONS = [
    ALTER TABLE seat_stats ADD COLUMN invalid INTEGER;
    ALTER TABLE seat_stats ADD COLUMN tokens_in INTEGER;
    ALTER TABLE seat_stats ADD COLUMN tokens_out INTEGER;`,
+  // v3 地图规格（XS/S/M/L/XL）：此前只有 128×128，旧行一律回填 XL
+  `ALTER TABLE matches ADD COLUMN map_size TEXT;
+   UPDATE matches SET map_size = 'XL';`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -147,6 +150,7 @@ const matchSummary = (r) => r && ({
   clientVersion: r.client_version,
   rulesVersion: r.rules_version,
   playerMode: r.player_mode,
+  mapSize: r.map_size ?? null,
   seed: r.seed,
   turns: r.turns,
   ranking: JSON.parse(r.ranking_json),
@@ -179,8 +183,8 @@ export async function openStore(path = ':memory:') {
     touchUser: db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?'),
     matchById: db.prepare('SELECT * FROM matches WHERE id = ?'),
     insertMatch: db.prepare(`INSERT INTO matches (id, user_id, host, platform, client_version, rules_version, record_version, config_hash, player_mode,
-      seed, map_hash, turns, ranking_json, seats_json, verify, verify_turn, verify_note, started_at, ended_at, received_at, record_sha256)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+      seed, map_hash, turns, ranking_json, seats_json, verify, verify_turn, verify_note, started_at, ended_at, received_at, record_sha256, map_size)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     insertRecord: db.prepare('INSERT INTO match_records (match_id, jsonl_gz, bytes) VALUES (?, ?, ?)'),
     insertSeat: db.prepare(`INSERT INTO seat_stats (match_id, seat, source, place, score, status, stamina, model, decisions, follow_yes, follow_partial,
       follow_override, invalid, tokens_in, tokens_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
@@ -253,7 +257,7 @@ export async function openStore(path = ':memory:') {
       try {
         q.insertMatch.run(m.id, m.userId, m.host, m.platform, m.clientVersion, m.rulesVersion, m.recordVersion, m.configHash, m.playerMode ?? null,
           m.seed, m.mapHash, m.turns, JSON.stringify(m.ranking), JSON.stringify(m.seats), m.verify, m.verifyTurn ?? null, m.verifyNote ?? null,
-          m.startedAt ?? null, m.endedAt ?? null, m.receivedAt, m.recordSha256);
+          m.startedAt ?? null, m.endedAt ?? null, m.receivedAt, m.recordSha256, m.mapSize ?? null);
         if (m.report) q.setReport.run(JSON.stringify(m.report), m.id);
         q.insertRecord.run(m.id, recordGz, rawBytes);
         for (const s of seats) {

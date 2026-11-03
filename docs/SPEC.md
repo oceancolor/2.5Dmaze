@@ -221,6 +221,9 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 | 四人的分数、体力、**各色持有数与成套数** | 全公开。拾取事件全局广播：谁、什么颜色、在哪格 | 【实现】成套计分让各色持有数成为关键博弈信息 |
 | 对手实时位置 | 只在切比雪夫 **R = 9**（19×19）内可见。视野外给「最后目击位置 + 已过回合数」，永不清除；拾取广播也会刷新最后目击位置 | 【沿用】＋【实现】 |
 | 宝箱开出结果 | 开出瞬间公示 | 【沿用】 |
+| 四个出生点、四个出口 | 全公开（脚本 `ctx.spawns / ctx.exits`；大模型局面 `rivals[].exit`） | 【实现】2026-11-03 |
+| 上一回合的全场事件（拾取 / 开箱结果 / 到达 / 出局 / 刷新） | 全公开，观察里 `obs.events`（`publicEvents()`）；撞墙 / 受阻只给自己。不进状态，不影响状态哈希 | 【实现】2026-11-03 |
+| 各座位用的是什么模式 | 不给脚本 / 大模型；只有手打的人能从界面名牌看到 | 【定】2026-11-03 |
 
 ### 6.2 观察构造器 【沿用】铁律 ＋【实现】schema 草案
 
@@ -240,7 +243,7 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 
 - 各消费者额外拿到的东西：
   - **LLM**：15×15 地形 patch（ASCII）+ 实体清单 + 导航事实（到各目标的 BFS 距离）+ 公开 HUD。**永远不注入全图。**
-  - **脚本**：另外可读只读的全图地形和寻路 API（§9.2）。
+  - **脚本**：开局 `ctx`（整图地形、出生点、出口、规则）+ 寻路 / 推演 API（§9.2、docs/07）。
 
 ---
 
@@ -329,23 +332,22 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 - 按住方向键时按当前倍速的节拍连续走。
 - 方向映射（屏幕方向 vs 网格方向）在灰盒阶段做 A/B 对比【待定】。
 
-### 9.2 脚本 【沿用】＋【实现】
+### 9.2 脚本 · 统一编程接口 v2（2026-11-03）【实现】
 
-- 运行在 Web Worker 中：`decide(obs, api) → 'N'|'E'|'S'|'W'|'STAY'`。
-- **api**：`shortestStep(x,y)`、`distance(x,y)`、`setState(v)` / `obs.state`、`log(...)`；另有只读全图地形。
-  - 寻路只接受公开目标、视野内或记忆中的坐标，越权返回 −1。
-  - 每次决策 ≤ 8 次寻路查询；`stateBag` ≤ 16 KB。
-- 超时 **100 ms**；Worker 创建后先做 1 次 warm-up 调用，不计入任何计数器。
-- 异常分三类，**互斥**计数，先判 L2 再判 L1：
-  - **A 硬异常**：超时 / 抛错 / 返回值不可结构化克隆。连续 10 次 → **L2 切回手动**。
-  - **B 软异常**：返回值不在 5 个方向之内。累计 5 次 → **L1 引擎接管，按 BFS 自动回家**【实现】。旧方案是「每回合停留」，在 U4a 之下等于拖到 600 回合判负，所以改掉。
-  - **C 撞墙**：正常玩法，不计数。
-- **诚实边界**：沙箱的目标是防误触 + 可观测 + 可复盘，不是安全隔离。
-  - 不用 `new Function`，因为它需要 `unsafe-eval`。
-  - Worker 的 CSP 必须由本地服务器在响应头里下发，写在 meta 标签里对 Worker 不生效。
+完整接口见 `docs/07-脚本编程接口.md`。要点：
 
-### 9.3 提示词托管 【沿用】
+- **人和 agent 同一套**：通用 agent 是「用写代码的方式玩的玩家」，与人用同一接口、同一份公开信息（§6.1）、同一套规则与预算。脚本写一次管一整局，**任意座位**都能用，和手打 / 接入大模型 / 电脑混排同场。
+- **接口**：可选 `init(ctx, api)`（开局一次）+ 必须 `decide(obs, api)` → `'N'|'E'|'S'|'W'|'STAY'` 或 `{move, intent}`；模块变量整局保留。`ctx` = 整图、四个出生点、四个出口、本规格规则（无种子、无各座位模式）；`obs` 另附上一回合公开事件 `obs.events`。
+- **api**：距离场 / 最短步不限次数（按计算预算计）；`api.sim.step` 单回合规则推演（底层真 `step()`，开箱只给概率分支、刷新只给标记、视野外对手需自行假设）；`api.random` 可复现（`Math.random` 同流）；`log` / `budget` / `elapsed`。v1 的 `obs.state` / `setState(≤16KB)` / `distance` / `shortestStep` 照常。
+- **预算（方案 C）**：`init` 2000 ms；每回合 50 ms + 时间银行（≤ 5000 ms）；超支当回合作废、沿最后的 intent 兜底（无 intent 回家）；卡死（可用 + 400 ms）重建并重新 init，3 次 → 自动回家。评测（`maze-eval` / 整局试跑）默认只统计不打断，结果逐字节可复现。预算常量在 `src/player/runtime/budget.js`，不进 cfg（配置哈希不变）。
+- **降级**：累计 5 次软异常（返回值无效）→ L1 自动回家；连续 10 次硬异常（抛错 / 卡死）→ 玩家座位 L2 切回手动，其他座位 L1。撞墙是正常玩法，不计数。
+- **运行环境**：浏览器模块 Worker（实时对局）、Node `vm`（命令行评测）、浏览器评测 Worker（整局试跑）共用 `src/player/runtime/*`。
+- **诚实边界**：沙箱是防误触 + 可观测 + 可复盘，不是安全隔离；不用 `eval` / `new Function`（Blob 模块 Worker，CSP `worker-src blob:`，由服务器响应头下发）。
+- 原「每回合 ≤ 8 次寻路、只能查公开目标」的限制取消：脚本本来就拿到整张地形，自己写 BFS 就能绕过，限制挡不住信息、只为难写脚本的人。
 
+### 9.3 提示词托管 【沿用】· 2026-11-02 起界面不再提供
+
+- 设置页只剩「自己手打 / 编写 Agent 脚本 / 接入大模型」三种；内核与服务器仍认 `prompt`，旧记录照常校验，存档里的 `prompt` 自动改回手打。
 - 与 AI agent **完全同构**：同一观察、同一模板骨架、同一节奏、同一预算池。
 - 玩家只能改「人格 / 策略」段，截断到 2000 字符；不能改观察注入部分。
 
@@ -367,6 +369,7 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
   - 四人的分数、体力、各色持有数和成套数；
   - 回家成本（BFS 步数）及颜色【实现】：绿 `s ≥ 1.3d`、黄 `d ≤ s < 1.3d`（终盘区）、红 `s < d`（= 告警状态）；
   - 常驻出口罗盘；
+  - **小地图**（右上，半透明，俯视正方形，每格 ≥ 2 px；Tab / 「收起」切换，状态记本机）：地形、宝石（菱形）、宝箱、四个出口；对手显示规则与主画面同源（`scene.actorViews`：视野内真身、视野外最后目击的半透明幽灵，观战 / 结算后全部真身），**不比主画面多透露信息**；白框 = 主画面视口；点击 / 拖动移动镜头。
   - 剩余宝石代数；
   - 各倍速档的预计时长。
 
@@ -448,7 +451,7 @@ tests/     *.test.mjs（node --test）
 
 - 共享代码（浏览器与服务器都运行，06 §3.4）：`src/core`、`src/ai`、`src/record`、`src/config`、`src/sim`、`src/app/scheduler.js`、`src/app/version.js`。由 `tools/lint-isomorphic.mjs` 守门：不得引用 DOM / 浏览器 API / Node API，只能 import 共享代码。
 
-- 与原计划的差异：`llm-client.js` 拆成 `ai/codec.js`（纯函数）+ `app/transport.js`（网络与计时器，必须在确定性 lint 范围外）；`panels.js` 并入 `ui/setup.js`；小地图未做（全图档 overview 代替）。
+- 与原计划的差异：`llm-client.js` 拆成 `ai/codec.js`（纯函数）+ `app/transport.js`（网络与计时器，必须在确定性 lint 范围外）；`panels.js` 并入 `ui/setup.js`；小地图 2026-11-02 补上（`ui/minimap.js`，见 §10）。
 
 - 零第三方依赖，原生 ES module，不用打包器；Node ≥ 22.13（服务器用内置 `node:sqlite`；浏览器端不受影响）。
 - 可选 JSDoc + `// @ts-check` 做类型检查，不引入构建步骤。
@@ -499,8 +502,8 @@ tests/     *.test.mjs（node --test）
     llm: { timeoutMs: 8000, retries: 1, temperature: 0, maxInputTokens: 1500, maxOutputTokens: 200,
            repairMaxTokens: 150, promptSuffixMaxChars: 2000 },
   },
-  script: { decisionTimeoutMs: 100, warmupCall: true, navCallBudget: 8, stateBagKB: 16,
-            l2ConsecutiveHard: 10, l1CumulativeSoft: 5, l1Action: 'auto-home' },
+  script: { decisionTimeoutMs: 100, warmupCall: true, navCallBudget: 8, stateBagKB: 16,   // v2 起 decisionTimeoutMs / warmupCall / navCallBudget 不再使用（保留以免配置哈希变化）；
+            l2ConsecutiveHard: 10, l1CumulativeSoft: 5, l1Action: 'auto-home' },         // v2 预算常量在 src/player/runtime/budget.js（§9.2）
   motion: { moveMs: 200, bumpMs: 180, pickMs: 320, endMs: 600, pickOverlaps: true,
             speeds: [1, 2, 4], defaultSpeed: 2, spectateSpeed: 4 },
   render: { tileW: 64, tileH: 32, wallHeight: 48, chunk: 8, lruMax: 64,
@@ -511,6 +514,25 @@ tests/     *.test.mjs（node --test）
 ```
 
 `ai.heuristic.*` 的权重仍是起始值（阶段 1 只验证了「不自杀、不卡死」，没有调优收集效率）；解锁参数经阶段 1 仿真确定。`makeConfig()` 遇到未知键直接抛错，结果深冻结。
+
+### 14.1 地图规格（2026-11-02）
+
+开局可选五档，`src/config/map-sizes.js` 的 `sizeOverrides(id)` 给出 `makeConfig` 覆盖项；上表即 XL，**XL 覆盖为空，配置哈希与引入规格前完全一致**，旧记录照常校验。
+
+| 档 | 边长 | 体力 | 回合上限 | 房间 | 墙密度目标 ± 容差 | 出生→出口 | 公平性 |
+|---|---|---|---|---|---|---|---|
+| XS | 16 | 50 | 100 | 0 · [2,3] | 0.43 ± 0.03 | [7, 18] | 0.6 |
+| S | 32 | 100 | 150 | 0 · [2,4] | 0.408 ± 0.016 | [15, 34] | 0.45 |
+| M | 64 | 200 | 300 | 1 · [3,7] | 0.38 ± 0.009 | [30, 58] | 0.35 |
+| L | 96 | 300 | 450 | 2 · [5,11] | 0.365 ± 0.008 | [46, 82] | 0.35 |
+| XL | 128 | 400 | 600 | 4 · [6,14] | 0.355 ± 0.008 | [68, 108] | 0.35 |
+
+- **逐档实测的**：墙密度、出生→出口步数、公平性（每档 60 种子的分布）。小图边框墙占比高，密度偏高；四人步数的相对差更大，公平性放宽。`thinKeep` 不变。
+- **按比例缩放的**：出生 `[2,2]…[N-3,N-3]`、出口在边中点 `N/2-1`；宝石 `minSeparation` / `respawnSepSchedule` / `gemRespawnMinActorDist`、宝箱 `respawnMinActorDist` 按边长比 `N/128`；宝箱体力、`chestLowStamina` 按体力比；宝箱重生间隔按回合比。
+- **不缩放的**：视野半径（是手感，不是地图比例，XS 上近乎全图可见属预期）、AI 调用预算（只是上限）。
+- **实测**（四启发式，每档 60 局）：到达率 XS 98%、其余 100%；到达者得分 P50 3–4，各档相近；回合 P50 = 49 / 95 / 189 / 281 / 378。200 种子生成零失败。
+- **服务器**：白名单 = 玩家通道 × 规格（20 个哈希），校验结果带 `mapSize`，`matches.map_size` 入库（迁移 v3，旧行回填 XL）。LLM 提示词里的边长取自配置。
+- **渲染**：全图档缩放上限 `zoomLevels[last] × 128 / N`（不超过最大档），小图全图档能放大。
 
 ---
 
@@ -553,6 +575,13 @@ tests/     *.test.mjs（node --test）
   - 浏览器端到端（`npm run play`）：打完一局 → 结算卡「记录已上传 · 服务器严格回放校验通过」→ 设置页战绩可见；断网打完 → 进本机队列 → 恢复网络后自动补传并校验通过；静态预览下如实提示「只存本机」。三条路径控制台 0 error。
   - L13 在服务器模式下复测：0.66 s 进入可操作对局，0 error。
   - K11 / K12：JS 277 / 600 KB，首屏 888 / 1229 KB（新增 sync.js / version.js）。
+- **统一编程接口 v2 闸门现状**（2026-11-03）：`npm test` = 151 个用例全部通过，桌面端 8 项通过。
+  - `tests/script-runtime.test.mjs`：时间银行记账；ctx 不含种子 / 模式；代码预处理；返回值规范化；公开事件过滤；events 不改变对局与记录；裁判（enforce 超时兜底、measure 只统计、软异常 → L1、非玩家座位硬异常 → L1、玩家座位 → L2）；随机数按种子 + 座位可复现；v1 示例零异常跑完整局；编译错误行号、死循环打断并重建。
+  - `tests/script-sim.test.mjs`：sim.step 与真实 step() 一致；同格冲突、对穿、链式、撞墙不扣、体力归零、最后一步踩出口、拾取；开箱只给分支、刷新只给标记；视野外对手默认不参与；非法输入报错。
+  - `tests/script-mixed.test.mjs`：座位 1–3 跑三种脚本 + 座位 0 启发式，XS / S / M 记录服务器回放 verified、`meta.scripts` 正确；同批脚本 + 种子两次记录逐字节相同；`script:<哈希>` 归类与 `meta.scripts` 形状检查。
+  - `tests/maze-eval.test.mjs`：评测结构与确定性；参考脚本 vs 原生启发式 XS / S 各 40 局到达率差 ≤ 5 个百分点、均分差 ≤ 0.6；命令行 JSON、退出码 1 / 2。
+  - 浏览器端到端（webapp-testing）：导入 agent 写的 .js → 脚本库 → 导出带文件头；对手座位选内置 / 导入脚本；整局试跑出统计；复制任务书；混合对局（我的脚本 + 参考脚本 + agent 脚本 + 模拟大模型）上传 → 服务器严格回放校验通过；模块 Worker 在 CSP 下正常，控制台 0 error。
+  - 旧记录 28 局全量重放：27 verified + 1 已知旧配置（10-29 超时参数改动前）；XL 配置哈希仍为 `7e19e5c6`。
 
 ---
 

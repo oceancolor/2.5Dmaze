@@ -31,8 +31,9 @@ const CORS_HEADERS = {
  *                    limits?:{ipPerMinute?:number, guestPerMinute?:number, guestBurst?:number, uploadPerMinute?:number,
  *                             keysPerMinute?:number, testPerMinute?:number, relayPerMinute?:number, relayBurst?:number}}}} o
  *   upstream：测试替身，替换真正的 HTTPS 上游调用（见 llm-relay.mjs httpsUpstream）
+ *   llmLog：大模型对话日志（llm-log.mjs）；不传 = 不记
  */
-export function createApp({ store, root = null, now = Date.now, upstream = undefined, options = {} }) {
+export function createApp({ store, root = null, now = Date.now, upstream = undefined, llmLog = null, options = {} }) {
   const opt = {
     allowedOrigins: [],
     trustProxy: false,
@@ -151,7 +152,7 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
         }
         const ip = clientIp(req, opt.trustProxy);
         limiters.ip.take(ip);
-        await api(req, res, url, { store, now, opt, limiters, url, ip, vault, matchCalls, upstream });
+        await api(req, res, url, { store, now, opt, limiters, url, ip, vault, matchCalls, upstream, llmLog });
         return;
       }
       if (serveStatic && (await serveStatic(req, res, p))) return;

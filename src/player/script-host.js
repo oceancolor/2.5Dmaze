@@ -1,31 +1,35 @@
-// 脚本 agent 宿主（SPEC §9.2）：每个脚本一个 Worker；每回合 begin 时把观察发过去，调度器在结果回来前等待。
-// 异常分级：
-//   A 硬异常 —— 超时（Worker 内测 decide 耗时 > decisionTimeoutMs）/ 抛错 / 返回值不可结构化克隆 / 卡死（硬期限到了仍未回，重建 Worker）。
-//               本回合原地等；连续 l2ConsecutiveHard 次 → L2 切回手动（wantsManual，调度器下回合起改等键盘）。
-//   B 软异常 —— 返回值不是 N/E/S/W/STAY、state 超 stateBagKB。本回合原地等；累计 l1CumulativeSoft 次 → L1 引擎接管、自动回家。
-//   C 撞墙 —— 正常玩法，不计数。
-// 代码加载不用 eval / new Function：Blob 里先 importScripts 桥，再接玩家代码（CSP worker-src blob:）。
+// 脚本座位的浏览器宿主（统一编程接口 v2，SPEC §9.2）：每个脚本一个模块 Worker；每回合 begin 时把观察发过去，
+// 调度器在结果回来前等待（blocking）。预算、兜底、降级、统计都在 runtime/control.js（与 Node 评测共用）。
+//   开局    编译（Blob 模块）→ bound → init（≤ initMs；超时重建并跳过 init）
+//   每回合  可用 = 基础额度 + 时间银行；超支 → 当回合作废，沿意图兜底；卡死（可用 + 宽限仍未回）→ 重建并重新 init
+// 任意座位可用：玩家座位连续硬异常切回手动（L2），其他座位改为自动回家（L1）。
+// 代码加载不用 eval / new Function：Blob 里 import 桥，再接玩家代码（CSP worker-src blob:，script-src 'self'）。
 
-import { now } from '../app/clock.js';
-import { DIR_NAMES, STAY, toDir } from '../core/geom.js';
-import { STREAM, createStream, subSeed } from '../core/rng.js';
-import { stepToward } from '../ai/heuristic.js';
+import { DIR_NAMES } from '../core/geom.js';
+import { BUDGET } from './runtime/budget.js';
+import { BIND_EXPR, normalizeResult, prepareScript } from './runtime/core.js';
+import { createGovernor } from './runtime/control.js';
 
-const HANG_GRACE_MS = 400;
 const BIND_TIMEOUT_MS = 3000;
+const LINE_OFFSET = 2; // 与 sandbox-worker.js 一致：import 行 + 块开头
 
-export const SCRIPT_TEMPLATE = `// 每回合调用一次，返回 'N' | 'E' | 'S' | 'W' | 'STAY'（N 是 y−1，E 是 x+1）。
-// obs 与手动界面、AI 拿到的是同一份观察；api 提供寻路（每回合最多 8 次）。
+export const SCRIPT_TEMPLATE = `// 统一编程接口 v2：init 开局调用一次（可选），decide 每回合调用一次。文档：docs/07-脚本编程接口.md
+// decide 返回 'N' | 'E' | 'S' | 'W' | 'STAY'（N 是 y−1，E 是 x+1），或 { move, intent } 让界面显示你的意图。
+let exit = null; // 模块变量整局保留
+
+function init(ctx, api) {
+  exit = ctx.exits[ctx.seat]; // ctx：整图、四个出生点、四个出口、本规格规则
+}
+
 function decide(obs, api) {
-  const me = obs.self;
-  return api.shortestStep(me.exit.x, me.exit.y); // 直奔出口
+  return { move: api.shortestStep(exit[0], exit[1]), intent: { type: 'exit', x: exit[0], y: exit[1], note: '直奔出口' } };
 }
 `;
 
 export const SCRIPT_EXAMPLES = Object.freeze({
   greedy: {
-    label: '贪心：最近且回得来的宝石',
-    code: `// 贪心：挑「去了还回得来」的最近宝石；体力只够回家就回家。
+    label: '贪心：最近且回得来的宝石（v1 写法）',
+    code: `// 贪心：挑「去了还回得来」的最近宝石；体力只够回家就回家。v1 写法（只有 decide）照常可用。
 function decide(obs, api) {
   const me = obs.self;
   const exit = me.exit;
@@ -45,8 +49,8 @@ function decide(obs, api) {
 `,
   },
   sets: {
-    label: '凑套 + 宝箱 + 记住目标',
-    code: `// 凑套：缺的颜色价值 ×3；宝箱近就先开；用 api.setState 记住目标，避免来回摇摆。
+    label: '凑套 + 宝箱 + 记住目标（v1 写法）',
+    code: `// 凑套：缺的颜色价值 ×3；宝箱近就先开；用 api.setState 记住目标，避免来回摇摆。v1 写法照常可用。
 function decide(obs, api) {
   const me = obs.self;
   const exit = me.exit;
@@ -78,18 +82,20 @@ function decide(obs, api) {
 const VALID = new Set(DIR_NAMES);
 
 function bridgeUrl() {
-  return new URL('../player/sandbox-worker.js', import.meta.url).href;
+  return new URL('./sandbox-worker.js', import.meta.url).href;
 }
 
+/** Worker 错误事件 → 文本（行号换算回玩家代码）。 */
+const workerErr = (e, fallback) => `${e.message || fallback}${e.lineno ? `（第 ${e.lineno - LINE_OFFSET} 行）` : ''}`;
+
 /**
- * 起一个 Worker 并等它把 decide 绑定好。编译错误 / 没有 decide → reject（带行号）。
+ * 起一个模块 Worker 并等它绑定好 init / decide。编译错误 / 没有 decide → reject（带行号）。
  * @returns {Promise<{worker:Worker, url:string}>}
  */
-function spawn(code, map, seat, cfg) {
-  const src = `importScripts(${JSON.stringify(bridgeUrl())});\n${code}\n;self.__bind(typeof decide === 'function' ? decide : null);\n`;
+function spawn(prepared) {
+  const src = `import { __bind } from ${JSON.stringify(bridgeUrl())};\n{\n${prepared}\n;__bind(${BIND_EXPR});\n}\n`;
   const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-  const worker = new Worker(url);
-  worker.postMessage({ type: 'init', size: map.size, grid: map.grid.slice().buffer, seat, R: cfg.vision.entityRadius, navBudget: cfg.script.navCallBudget });
+  const worker = new Worker(url, { type: 'module' });
   return new Promise((resolve, reject) => {
     const kill = (msg) => {
       worker.terminate();
@@ -100,8 +106,7 @@ function spawn(code, map, seat, cfg) {
     worker.onerror = (e) => {
       e.preventDefault();
       clearTimeout(timer);
-      const line = e.lineno ? `（第 ${e.lineno - 1} 行）` : '';
-      kill(`${e.message || '脚本加载失败'}${line}`);
+      kill(workerErr(e, '脚本加载失败（多半是语法错误）'));
     };
     worker.onmessage = (e) => {
       if (e.data.type !== 'bound') return;
@@ -113,67 +118,102 @@ function spawn(code, map, seat, cfg) {
   });
 }
 
-/** 发一次决策并等结果（试运行 / warm-up 用；不计异常）。 */
-function callOnce(worker, obs, state, ms) {
+/** 向 Worker 发 init 并等结果；超过 initMs + 宽限 → null（调用方重建并跳过 init）。 */
+function initWorker(w, { map, seat, cfg, seed, skipInit = false }) {
   return new Promise((resolve) => {
-    const id = -1;
-    const timer = setTimeout(() => resolve({ error: `超时（>${ms} ms 未返回）` }), ms);
-    const prev = worker.onmessage;
-    worker.onmessage = (e) => {
-      if (e.data.type !== 'result' || e.data.id !== id) return;
+    const timer = setTimeout(() => resolve(null), BUDGET.initMs + BUDGET.hangGraceMs);
+    w.worker.onmessage = (e) => {
+      if (e.data.type !== 'inited') return;
       clearTimeout(timer);
-      worker.onmessage = prev;
       resolve(e.data);
     };
-    worker.postMessage({ type: 'decide', id, obs, state });
+    const grid = map.grid.slice();
+    w.worker.postMessage({ type: 'init', size: map.size, grid: grid.buffer, exits: map.exits, spawns: map.spawns, seat, cfg, seed, skipInit }, [grid.buffer]);
   });
 }
 
-/** 试运行（开局设置页）：编译 + 用给定观察调用一次。返回 {ok, dir, logs, ms, error}。 */
-export async function testScript({ code, map, seat, cfg, obs }) {
-  let w;
+function close(w) {
+  if (!w) return;
+  w.worker.terminate();
+  URL.revokeObjectURL(w.url);
+}
+
+/** 起 Worker + init；init 超时则重建并跳过 init。返回 {w, init}。 */
+async function boot(prepared, env) {
+  let w = await spawn(prepared);
+  let r = await initWorker(w, env);
+  if (!r) {
+    close(w);
+    w = await spawn(prepared);
+    r = await initWorker(w, { ...env, skipInit: true });
+    if (!r) {
+      close(w);
+      throw new Error('运行环境启动失败');
+    }
+    r = { ...r, skipped: `init 超过 ${BUDGET.initMs} ms 未完成，已跳过 init 开局（模块变量为初始值）` };
+  } else if (r.skipped) r = { ...r, skipped: null };
+  return { w, init: r };
+}
+
+/** 发一次 decide 并等结果（试运行用）。 */
+function callOnce(worker, obs, ms) {
+  return new Promise((resolve) => {
+    const id = -1;
+    const timer = setTimeout(() => resolve({ error: `超时（>${ms} ms 未返回）` }), ms);
+    worker.onmessage = (e) => {
+      if (e.data.type !== 'result' || e.data.id !== id) return;
+      clearTimeout(timer);
+      resolve(e.data);
+    };
+    worker.postMessage({ type: 'decide', id, obs, state: null, budget: { turnMs: BUDGET.baseMs, bankMs: 0, availableMs: BUDGET.baseMs, bankCapMs: BUDGET.bankCapMs } });
+  });
+}
+
+/** 试运行（开局设置页）：编译 + init + 用给定观察调用一次。返回 {ok, dir, intent, logs, ms, initMs, error}。 */
+export async function testScript({ code, map, seat, cfg, seed = 1, obs }) {
+  const p = prepareScript(code);
+  if (!p.ok) return { ok: false, error: p.error, logs: [] };
+  let b;
   try {
-    w = await spawn(code, map, seat, cfg);
+    b = await boot(p.code, { map, seat, cfg, seed });
   } catch (e) {
     return { ok: false, error: e.message, logs: [] };
   }
-  const r = await callOnce(w.worker, obs, null, 1000);
-  w.worker.terminate();
-  URL.revokeObjectURL(w.url);
-  if (r.error) return { ok: false, error: r.error, logs: r.logs ?? [], ms: r.ms };
-  const dir = typeof r.dir === 'string' ? r.dir.toUpperCase() : r.dir;
-  if (!VALID.has(dir)) return { ok: false, error: `返回值 ${JSON.stringify(r.dir)} 不是 N/E/S/W/STAY`, logs: r.logs, ms: r.ms };
-  return { ok: true, dir, logs: r.logs, ms: r.ms, nav: r.nav, denied: r.denied };
+  const initLogs = b.init.logs ?? [];
+  if (b.init.error) {
+    close(b.w);
+    return { ok: false, error: `init：${b.init.error}`, logs: initLogs, initMs: b.init.ms };
+  }
+  const r = await callOnce(b.w.worker, obs, BUDGET.initMs);
+  close(b.w);
+  const logs = [...initLogs, ...(r.logs ?? [])];
+  if (r.error) return { ok: false, error: r.error, logs, ms: r.ms, initMs: b.init.ms };
+  if (r.invalid) return { ok: false, error: r.invalid, logs, ms: r.ms, initMs: b.init.ms };
+  const n = normalizeResult(r.intent ? { move: r.move, intent: r.intent } : r.move, map.size);
+  if (!n.ok || !VALID.has(n.move)) return { ok: false, error: n.error, logs, ms: r.ms };
+  return { ok: true, dir: n.move, intent: n.intent, logs, ms: r.ms, initMs: b.init.ms, skipped: b.init.skipped ?? null, warn: r.warn ?? null };
 }
 
 /**
- * @param {{code:string, map:object, seat:number, cfg:object, seed:number, warmObs:object,
+ * @param {{code:string, map:object, seat:number, cfg:object, seed:number, isPlayer?:boolean,
  *          onLog?:(turn:number, lines:string[])=>void, onEvent?:(e:object)=>void}} o
  * @returns {Promise<object>} 控制器（编译失败 reject）
  */
-export async function createScriptController({ code, map, seat, cfg, seed, warmObs, onLog = null, onEvent = null }) {
-  const S = cfg.script;
-  const st = createStream(subSeed(subSeed(seed >>> 0, STREAM.AI), seat));
-  const mem = { yieldSeat: -1, yieldLeft: 0 };
-  let w = await spawn(code, map, seat, cfg);
-  if (S.warmupCall) {
-    const wr = await callOnce(w.worker, warmObs, null, 1000);
-    if (wr.error && /超时/.test(wr.error)) {
-      // warm-up 就卡死了：这个 Worker 已经回不来，换一个新的再开局（第 1 回合照常计时、计异常）
-      w.worker.terminate();
-      URL.revokeObjectURL(w.url);
-      w = await spawn(code, map, seat, cfg);
-    }
-  }
+export async function createScriptController({ code, map, seat, cfg, seed, isPlayer = seat === cfg.match.playerSeat, onLog = null, onEvent = null }) {
+  const p = prepareScript(code);
+  if (!p.ok) throw new Error(p.error);
+  const env = { map, seat, cfg, seed };
+  const gov = createGovernor({ map, seat, cfg, seed, mode: 'enforce', isPlayer, onEvent });
+  let { w, init } = await boot(p.code, env);
+  gov.noteInit(init);
+  if (init.logs && init.logs.length && onLog) onLog(0, init.logs);
 
+  let ready = true;
+  let disposed = false;
   let reqId = 0;
   let pendingTurn = -1;
   let reply = null;
   let hangTimer = 0;
-  let bag = null;
-  let mode = 'script'; // script | auto-home | manual
-  const counts = { hard: 0, hardStreak: 0, soft: 0, ok: 0, avgMs: 0, maxMs: 0 };
-  const emit = (e) => onEvent && onEvent(e);
 
   const listen = () => {
     w.worker.onmessage = (e) => {
@@ -181,106 +221,80 @@ export async function createScriptController({ code, map, seat, cfg, seed, warmO
       if (m.type !== 'result' || m.id !== reqId || reply !== null) return;
       clearTimeout(hangTimer);
       reply = m;
-      if (!m.error && m.ms > S.decisionTimeoutMs) reply = { ...m, error: `超时（${Math.round(m.ms)} ms > ${S.decisionTimeoutMs} ms）` };
     };
     w.worker.onerror = (e) => {
       e.preventDefault();
-      if (reply === null && pendingTurn >= 0) reply = { error: e.message || 'Worker 错误' };
+      if (reply === null && pendingTurn >= 0) reply = { error: workerErr(e, 'Worker 错误') };
     };
   };
   listen();
 
-  async function respawn() {
-    w.worker.terminate();
-    URL.revokeObjectURL(w.url);
+  async function respawn(turn, why) {
+    ready = false;
+    close(w);
+    gov.noteReset(turn, why);
     try {
-      w = await spawn(code, map, seat, cfg);
+      const b = await boot(p.code, env);
+      if (disposed) {
+        close(b.w);
+        return;
+      }
+      w = b.w;
+      if (b.init.error || b.init.skipped) gov.noteInit(b.init);
       listen();
+      ready = true;
     } catch (e) {
-      mode = 'auto-home';
-      emit({ type: 'degrade', level: 'L1', reason: `重建 Worker 失败：${e.message}` });
+      if (onEvent) onEvent({ seat, type: 'degrade', level: 'L1', reason: `重建运行环境失败：${e.message}` });
     }
   }
 
   const ctrl = {
     kind: 'script',
-    wantsManual: null,
-    get mode() { return mode; },
-    get counts() { return { ...counts }; },
+    get wantsManual() { return gov.wantsManual; },
+    get mode() { return gov.level; },
+    get counts() { return gov.status().counts; },
 
     begin(obs, turn) {
-      if (mode !== 'script' || pendingTurn === turn) return;
+      if (gov.level !== 'script' || pendingTurn === turn) return;
       pendingTurn = turn;
       reply = null;
+      if (!ready) {
+        reply = { error: '运行环境重建中' };
+        return;
+      }
       const id = ++reqId;
-      w.worker.postMessage({ type: 'decide', id, obs, state: bag });
-      const t0 = now();
+      w.worker.postMessage({ type: 'decide', id, obs, state: gov.bag, budget: gov.budget() });
+      const hang = gov.hangMs();
       hangTimer = setTimeout(() => {
         if (reply !== null || reqId !== id) return;
-        reply = { error: `卡死（${Math.round(now() - t0)} ms 未返回，已重建 Worker）` };
-        respawn();
-      }, S.decisionTimeoutMs + HANG_GRACE_MS);
+        const why = `卡死（${Math.round(hang)} ms 未返回，已重建运行环境，模块变量丢失）`;
+        reply = { error: why };
+        respawn(turn, why);
+      }, hang);
     },
 
     blocking(turn) {
-      return mode === 'script' && pendingTurn === turn && reply === null;
+      return gov.level === 'script' && pendingTurn === turn && reply === null;
     },
 
     decide(obs, turn) {
-      if (mode === 'auto-home') {
-        return { dir: stepToward(map, obs, { type: 'exit', x: obs.self.exit.x, y: obs.self.exit.y }, cfg, st, mem), source: 'auto-home', mode: 'home' };
-      }
-      if (mode !== 'script') return { dir: STAY, source: 'manual-pending' };
-      const r = reply ?? { error: '没有结果' };
-      if (r.logs && r.logs.length && onLog) onLog(turn, r.logs);
-      if (r.error) {
-        counts.hard++;
-        counts.hardStreak++;
-        emit({ type: 'hard', turn, error: r.error, streak: counts.hardStreak });
-        if (counts.hardStreak >= S.l2ConsecutiveHard) {
-          mode = 'manual';
-          ctrl.wantsManual = `连续 ${S.l2ConsecutiveHard} 次硬异常`;
-          emit({ type: 'degrade', level: 'L2', reason: ctrl.wantsManual });
-        }
-        return { dir: STAY, source: 'script-error', error: r.error };
-      }
-      counts.hardStreak = 0;
-      counts.ok++;
-      counts.maxMs = Math.max(counts.maxMs, r.ms || 0);
-      counts.avgMs += ((r.ms || 0) - counts.avgMs) / counts.ok;
-      let softWhy = null;
-      if (r.state !== undefined) {
-        let size = 0;
-        try {
-          size = JSON.stringify(r.state ?? null)?.length ?? 0;
-        } catch {
-          size = 0;
-        }
-        if (size > S.stateBagKB * 1024) softWhy = `state 超过 ${S.stateBagKB} KB（${Math.ceil(size / 1024)} KB），已丢弃`;
-        else bag = r.state;
-      }
-      const name = typeof r.dir === 'string' ? r.dir.toUpperCase() : r.dir;
-      if (!VALID.has(name)) softWhy = `返回值 ${JSON.stringify(r.dir)} 不是 N/E/S/W/STAY`;
-      if (softWhy) {
-        counts.soft++;
-        emit({ type: 'soft', turn, error: softWhy, total: counts.soft });
-        if (counts.soft >= S.l1CumulativeSoft) {
-          mode = 'auto-home';
-          emit({ type: 'degrade', level: 'L1', reason: `累计 ${S.l1CumulativeSoft} 次软异常，引擎接管自动回家` });
-        }
-        if (!VALID.has(name)) return { dir: STAY, source: 'script-invalid', error: softWhy };
-      }
-      return { dir: toDir(name), source: 'script', ms: r.ms };
+      const r = gov.level === 'script' ? reply : null;
+      if (r && r.logs && r.logs.length && onLog) onLog(turn, r.logs);
+      return gov.settle(turn, obs, r);
     },
 
     status() {
-      return { source: mode === 'script' ? 'script' : mode, counts: { ...counts }, mode };
+      return { ...gov.status(), timing: gov.timing() };
+    },
+
+    report() {
+      return { ...gov.status().counts, timing: gov.timing() };
     },
 
     dispose() {
+      disposed = true;
       clearTimeout(hangTimer);
-      w.worker.terminate();
-      URL.revokeObjectURL(w.url);
+      close(w);
     },
   };
   return ctrl;

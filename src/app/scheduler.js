@@ -64,11 +64,13 @@ export function estimateSeconds(turnsLeft, cfg, speed, skipAnim = false, waitPer
 /**
  * @param {object} cfg
  * @param {number|string} seed
- * @param {{playerSeat?:number, manual?:boolean, controllers?:(object|null)[], seatLabels?:string[], players?:object[], match?:object,
+ * @param {{playerSeat?:number, manual?:boolean, controllers?:(object|null)[], seatLabels?:string[], players?:object[], scripts?:object[], match?:object,
  *          makeController?:(map:object, seat:number, cfg:object, seed:number)=>object}} [opts]
- *   controllers：每座位一个控制器（null = 手动，只允许玩家座位）；可传函数 (match) => 数组，以便控制器拿到地图与种子
+ *   controllers：每座位一个控制器（null = 手动，只允许玩家座位；其余座位可以是脚本 / 大模型 / 启发式任意混排）；
+ *     可传函数 (match) => 数组，以便控制器拿到地图与种子
  *   match：预先建好的 createMatch(seed, cfg)（异步控制器要先拿地图时用；必须是同一 seed / cfg）
  *   players：记录 meta 里玩家 AI 的说明（服务商 / 模型 / 自主度 / 思路哈希），见 recorder.js
+ *   scripts：记录 meta 里脚本座位的说明（名称 / 作者 / 来源 / 代码哈希），见 recorder.js
  */
 export function createScheduler(cfg, seed, opts = {}) {
   const playerSeat = opts.playerSeat ?? cfg.match.playerSeat;
@@ -89,7 +91,7 @@ export function createScheduler(cfg, seed, opts = {}) {
     ctrls = Array.from({ length: n }, (_, i) => (i === playerSeat && manual0 ? null : make(map, i, cfg, match.seed)));
   }
   let manual = ctrls[playerSeat] === null;
-  const rec = createRecorder(match, cfg, { seats: opts.seatLabels, players: opts.players });
+  const rec = createRecorder(match, cfg, { seats: opts.seatLabels, players: opts.players, scripts: opts.scripts });
   const listeners = new Map();
   const queue = [];
 
@@ -144,8 +146,10 @@ export function createScheduler(cfg, seed, opts = {}) {
     }
   }
 
+  // obs.events = 上一回合的公开事件（第 1 回合为空）；不进 state，不影响 stateHash / 记录
+  const lastEvents = () => (last ? last.events : []);
   const obsFor = (i) => {
-    if (!obsCache[i]) obsCache[i] = observe(map, state, i, cfg, { patch: Boolean(ctrls[i] && ctrls[i].wantsPatch) });
+    if (!obsCache[i]) obsCache[i] = observe(map, state, i, cfg, { patch: Boolean(ctrls[i] && ctrls[i].wantsPatch), events: lastEvents() });
     return obsCache[i];
   };
 
@@ -322,7 +326,7 @@ export function createScheduler(cfg, seed, opts = {}) {
     },
 
     observeFor(seat = playerSeat) {
-      return observe(map, state, seat, cfg, { patch: false });
+      return observe(map, state, seat, cfg, { patch: false, events: lastEvents() });
     },
 
     toJSONL() { return rec.toJSONL(); },

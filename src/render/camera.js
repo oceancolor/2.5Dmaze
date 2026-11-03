@@ -14,6 +14,8 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
   let snapped = false;
   let free = false;
   let fit = zoomLevels[last];
+  // 全图档上限按 128 调；小图同样视口能放更大（XL 时 = zoomLevels[last]，行为不变），但不超过最大档
+  const fitCap = Math.min(zoomLevels[0], (zoomLevels[last] * 128) / size);
 
   const clampX = (v) => Math.min(wb.maxX, Math.max(wb.minX, v));
   const clampY = (v) => Math.min(wb.maxY, Math.max(wb.minY, v));
@@ -40,7 +42,7 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
     },
     /** 每帧推进阻尼。viewW/viewH 为 CSS 像素视口；全图档居中不动（拖拽后可平移）。 */
     update(dt, viewW, viewH) {
-      fit = Math.min(zoomLevels[last], (0.97 * viewW) / wb.width, (0.94 * viewH) / wb.height);
+      fit = Math.min(fitCap, (0.97 * viewW) / wb.width, (0.94 * viewH) / wb.height);
       if (this.overview && !free) {
         x = (wb.minX + wb.maxX) / 2;
         y = (wb.minY + wb.maxY) / 2;
@@ -60,6 +62,12 @@ export function createCamera({ zoomLevels, size, tau = 90 }) {
     },
     recenter() {
       free = false;
+    },
+    /** 把视口中心移到世界坐标（小地图点选）；脱离跟随，玩家一动或按 F 归位。 */
+    lookAt(wx, wy) {
+      free = true;
+      x = clampX(wx);
+      y = clampY(wy);
     },
     setZoomIndex(i) {
       zi = Math.min(zoomLevels.length - 1, Math.max(0, i));

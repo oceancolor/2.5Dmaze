@@ -35,10 +35,10 @@ test('checkLocalBaseUrl：https 公网沿用服务器规则；http 只放行本�
   assert.throws(() => checkLocalBaseUrl('https://localhost/v1'), /内网/);
 });
 
-test('localProviderList：含本机 Ollama 预设', () => {
-  const list = localProviderList();
-  assert.ok(list.find((p) => p.id === 'ollama' && p.local));
-  assert.ok(list.find((p) => p.id === 'hunyuan'));
+test('localProviderList：与服务器同一份预设（4 个 MaaS 模型 + 自定义），本机模型走自定义', () => {
+  const ids = localProviderList().map((p) => p.id);
+  assert.deepEqual(ids, ['hunyuan', 'kimi', 'deepseek', 'glm', 'custom']);
+  assert.match(localProviderList().find((p) => p.id === 'custom').note, /127\.0\.0\.1/);
 });
 
 test('vault：记住=加密入库（明文不落盘/不回显），仅本次运行=只在内存，删除生效', () => {
@@ -86,8 +86,8 @@ test('vault：系统加密不可用时「记住」被拒，仅本次运行仍可
   try {
     const v = createLocalVault({ file: join(dir, 'k.json'), crypto: { available: () => false, encrypt: () => Buffer.alloc(0), decrypt: () => '' }, now: () => 1 });
     assert.equal(v.canRemember(), false);
-    assert.throws(() => v.add({ provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', apiKey: '', reasoning: false, remember: true }), /remember_unavailable/);
-    const ok = v.add({ provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', apiKey: '', reasoning: false, remember: false });
+    assert.throws(() => v.add({ provider: 'custom', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', apiKey: '', reasoning: false, remember: true }), /remember_unavailable/);
+    const ok = v.add({ provider: 'custom', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', apiKey: '', reasoning: false, remember: false });
     assert.equal(ok.remember, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -109,7 +109,8 @@ test('direct.addKey：校验服务商 / 地址 / 模型名 / key；本机地址�
     assert.equal(d.addKey({ provider: 'custom', baseUrl: 'http://10.0.0.1/v1', model: 'm', apiKey: 'sk-12345678' }).error, 'bad_base_url');
     assert.equal(d.addKey({ provider: 'hunyuan', model: 'bad model!', apiKey: 'sk-12345678' }).error, 'bad_model');
     assert.equal(d.addKey({ provider: 'hunyuan', model: 'hy4-preview', apiKey: 'short' }).error, 'bad_api_key');
-    assert.equal(d.addKey({ provider: 'ollama', apiKey: '' }).ok, true, '本机模型不需要 key');
+    assert.equal(d.addKey({ provider: 'custom', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', apiKey: '' }).ok, true, '本机地址不需要 key');
+    assert.equal(d.addKey({ provider: 'ollama', apiKey: '' }).error, 'bad_provider', 'Ollama 预设已下线');
     assert.equal(d.addKey({ provider: 'hunyuan', model: 'hy4-preview', apiKey: 'sk-12345678' }).ok, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });

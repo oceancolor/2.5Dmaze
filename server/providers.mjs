@@ -9,20 +9,40 @@ import { lookup as dnsLookup } from 'node:dns';
 import { isIP } from 'node:net';
 
 /**
- * verified：已用真实凭证实测过（其余地址与模型名以厂商文档为准，上线前逐个核对）。
- * extra(reasoning)：附加到请求体的字段（例：混元关闭思考，否则 max_tokens 内只有思考、答案为空）。
+ * 预设：四个模型都在腾讯 MaaS 网关上，共用同一把凭证（2026-11-02 真凭证实测）；另留「自定义（OpenAI 兼容）」。
+ * verified：已用真实凭证跑通过「测试连接」。
+ * extra(reasoning)：附加到请求体的字段，用来关掉 / 压低思考。不压的话 completion_tokens 含思考 token，
+ *   200 的输出预算会被思考吃光、content 为空（K3 实测）。各家写法不同，网关对不认识的写法直接 400：
+ *   HY4 / K3 / DeepSeek 认 thinking:{type:'disabled'}（关掉后 reasoning_tokens = 0）；
+ *   GLM 关不掉（thinking:disabled、reasoning_effort:none / minimal 都 400），最低只能 reasoning_effort:'low'。
+ * outputFloor：普通档的输出预算下限。思考关不掉的模型要给残余思考留余量，否则答案被截断。
  */
+const MAAS = 'https://tokenhub.tencentmaas.com/v1';
+const disableThinking = (reasoning) => (reasoning ? {} : { thinking: { type: 'disabled' } });
+const lowEffort = (reasoning) => (reasoning ? {} : { reasoning_effort: 'low' });
+
 export const PROVIDERS = Object.freeze({
   hunyuan: Object.freeze({
-    label: '腾讯混元（HY4）', baseUrl: 'https://tokenhub.tencentmaas.com/v1', model: 'hy4-preview', verified: true,
-    note: '默认关闭思考：每次决策约 3 秒、输入约 800 token、输出约 35 token',
-    extra: (reasoning) => (reasoning ? {} : { thinking: { type: 'disabled' } }),
+    label: '腾讯混元 HY4', baseUrl: MAAS, model: 'hy4-preview', verified: true,
+    note: '关闭思考：每次决策约 3 秒、输入约 1k token、输出约 35 token',
+    extra: disableThinking,
   }),
-  deepseek: Object.freeze({ label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', verified: false }),
-  ark: Object.freeze({ label: '火山方舟（豆包）', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '', verified: false, note: '模型名填方舟控制台里的模型名或接入点 ID' }),
-  dashscope: Object.freeze({ label: '阿里云百炼（通义）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', verified: false }),
-  moonshot: Object.freeze({ label: 'Moonshot（Kimi）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', verified: false }),
-  openai: Object.freeze({ label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', verified: false, note: '服务器在中国大陆时可能连不通' }),
+  kimi: Object.freeze({
+    label: 'Kimi K3', baseUrl: MAAS, model: 'kimi-k3', verified: true,
+    note: '关闭思考：每次决策约 2.5 秒、输出约 36 token。勾「这是推理模型」则先思考（约 22 秒、500 token）',
+    extra: disableThinking,
+  }),
+  deepseek: Object.freeze({
+    label: 'DeepSeek V4.1 Flash', baseUrl: MAAS, model: 'deepseek-v4.1-flash', verified: true,
+    note: '关闭思考：每次决策约 1.5 秒、输出约 35 token',
+    extra: disableThinking,
+  }),
+  glm: Object.freeze({
+    label: 'GLM-5.3 Flash', baseUrl: MAAS, model: 'glm-5.3-flash', verified: true,
+    note: '思考关不掉、只能压到 low：每次决策约 12 秒；输出预算自动放宽到 1000 token 给残余思考留余量',
+    extra: lowEffort,
+    outputFloor: 1000,
+  }),
   custom: Object.freeze({ label: '自定义（OpenAI 兼容）', baseUrl: '', model: '', verified: false, note: '只允许 https:// 公网地址' }),
 });
 
@@ -33,6 +53,20 @@ export function providerList() {
 export function extraBody(providerId, reasoning) {
   const p = PROVIDERS[providerId];
   return p && p.extra ? p.extra(Boolean(reasoning)) : {};
+}
+
+/** 输出预算上限：普通档 400、推理档 4000；思考关不掉的模型普通档抬到它的 outputFloor。 */
+export const OUTPUT_CAP = Object.freeze({ normal: 400, reasoning: 4000 });
+
+/**
+ * 实际发给上游的 max_tokens：请求值先抬到服务商下限，再按档位封顶。
+ * 服务器中转与桌面端本机直连共用这条规则。
+ */
+export function outputBudget(providerId, requested, reasoning) {
+  const floor = (PROVIDERS[providerId] && PROVIDERS[providerId].outputFloor) || 0;
+  const cap = reasoning ? OUTPUT_CAP.reasoning : Math.max(OUTPUT_CAP.normal, floor);
+  const want = Number.isInteger(requested) && requested > 0 ? requested : 200;
+  return Math.min(Math.max(want, floor), cap);
 }
 
 function v4Public(ip) {

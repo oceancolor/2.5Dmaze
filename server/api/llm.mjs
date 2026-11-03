@@ -15,7 +15,7 @@ import { buildMessages, buildPayload, checkContract, parsePlan, validatePlan, AU
 import { PERSONAS } from '../../src/ai/mock-llm.js';
 import { HttpError, readJson, sendJson } from '../http.mjs';
 import { authenticate } from './accounts.mjs';
-import { PROVIDERS, checkBaseUrl, extraBody, providerList } from '../providers.mjs';
+import { PROVIDERS, checkBaseUrl, extraBody, outputBudget, OUTPUT_CAP, providerList } from '../providers.mjs';
 import { chatCompletion } from '../llm-relay.mjs';
 
 const KEY_ID = /^k_[A-Za-z0-9_-]{16}$/;
@@ -27,7 +27,6 @@ const MAX_CHARS = 32000;
 /** 上游超时：普通模型 45 s、推理模型 90 s；比客户端（40 s / 85 s）略长，由客户端判超时与重试。
  *  HY4 关闭思考实测经中转 P50 ≈ 2.9 s，最慢 24.9 s。客户端放弃后这里仍等上游回来并记账（服务商照样计费）。 */
 export const RELAY_TIMEOUT_MS = { normal: 45000, reasoning: 90000 };
-const MAX_TOKENS = { normal: 400, reasoning: 4000 };
 /** 每局经中转的调用上限（4 座位 × 360 次池上限 + 修复，留余量）；防止中转被当成通用代理。 */
 const MATCH_CALL_CAP = 1600;
 
@@ -52,20 +51,34 @@ function upstreamFail(res, r) {
   sendJson(res, e.status, { error: e.code, message: r.message, upstreamStatus: r.status, ms: r.ms });
 }
 
-function record(ctx, user, k, { matchId = null, seat = null, kind, r }) {
+function record(ctx, user, k, { matchId = null, seat = null, kind, r, messages, maxTokens }) {
   ctx.store.insertUsage({
     userId: user.id, matchId, seat, kind, provider: k.provider, model: k.model,
     tokensIn: r.ok ? r.usage.in : 0, tokensOut: r.ok ? r.usage.out : 0, ms: r.ms, ok: r.ok, at: ctx.now(),
   });
   if (r.ok) ctx.vault.touch(k.id);
+  // 对话日志：只放 keyId 与尾号，不放 key（k.apiKey 不进这个对象）
+  if (ctx.llmLog && ctx.llmLog.enabled) {
+    ctx.llmLog.write({
+      userId: user.id, matchId, seat, kind,
+      provider: k.provider, model: k.model, reasoning: Boolean(k.reasoning), keyId: k.id, keyHint: k.hint,
+      request: { maxTokens, extra: extraBody(k.provider, k.reasoning), messages },
+      ok: r.ok, ms: r.ms,
+      ...(r.ok
+        ? { reply: r.text, finish: r.finish, usage: r.usage, upstreamModel: r.model }
+        : { error: { kind: r.kind, status: r.status, message: r.message } }),
+    });
+  }
 }
+
+const budgetOf = (k, maxTokens) => outputBudget(k.provider, maxTokens, k.reasoning);
 
 const call = (ctx, k, { messages, maxTokens, temperature }) => chatCompletion({
   base: k.baseUrl,
   model: k.model,
   apiKey: k.apiKey,
   messages,
-  maxTokens: Math.min(maxTokens, k.reasoning ? MAX_TOKENS.reasoning : MAX_TOKENS.normal),
+  maxTokens: budgetOf(k, maxTokens),
   temperature,
   extra: extraBody(k.provider, k.reasoning),
   timeoutMs: k.reasoning ? RELAY_TIMEOUT_MS.reasoning : RELAY_TIMEOUT_MS.normal,
@@ -129,8 +142,10 @@ export async function testKey(req, res, ctx, id) {
   const obs = observe(m.map, m.state, 0, cfg, { patch: true });
   const payload = buildPayload(m.map, obs, cfg);
   const messages = buildMessages(payload, strategy, cfg, { autonomy, safetyGate: true, context: { why: 'start', plan: null, budget: cfg.ai.normalSoftCapPerAgent } });
-  const r = await call(ctx, k, { messages, maxTokens: cfg.ai.llm.maxOutputTokens, temperature: 0 });
-  record(ctx, user, k, { kind: 'test', r });
+  // 推理模型的输出预算要跟着放宽：配置里的 maxOutputTokens(200) 会把思考 token 一起吃掉，content 还没写出来就被截断。
+  const maxTokens = k.reasoning ? OUTPUT_CAP.reasoning : cfg.ai.llm.maxOutputTokens;
+  const r = await call(ctx, k, { messages, maxTokens, temperature: 0 });
+  record(ctx, user, k, { kind: 'test', r, messages, maxTokens: budgetOf(k, maxTokens) });
   if (!r.ok) {
     upstreamFail(res, r);
     return;
@@ -176,7 +191,7 @@ export async function relayChat(req, res, ctx) {
   const maxTokens = Number.isInteger(b.max_tokens) && b.max_tokens > 0 ? b.max_tokens : 200;
   const temperature = Number.isFinite(b.temperature) ? Math.min(1, Math.max(0, b.temperature)) : 0;
   const r = await call(ctx, k, { messages: msgs, maxTokens, temperature });
-  record(ctx, user, k, { matchId: b.matchId, seat, kind, r });
+  record(ctx, user, k, { matchId: b.matchId, seat, kind, r, messages: msgs, maxTokens: budgetOf(k, maxTokens) });
   if (!r.ok) {
     upstreamFail(res, r);
     return;

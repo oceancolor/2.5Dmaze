@@ -143,6 +143,16 @@ select:disabled { opacity: .5; }
 .hud { position: absolute; pointer-events: auto; display: flex; flex-direction: column; gap: 10px; }
 .hud.tl { left: 26px; top: 26px; width: 228px; }
 .hud.tr { right: 26px; top: 26px; width: 258px; align-items: stretch; }
+/* 小地图：右上、半透明、正方形俯视；宽于面板时向左伸出 */
+.minimap { align-self: flex-end; width: max-content; padding: 6px 7px 7px; border: 2px solid var(--brass); border-radius: 7px;
+  background: rgba(28, 22, 16, .58); color: #F4E8C8; opacity: .84; transition: opacity .15s; }
+.minimap:hover { opacity: 1; }
+.minimap .mm-head { display: flex; align-items: center; gap: 6px; font: 600 12px/1 var(--font); margin-bottom: 5px; }
+.minimap.closed .mm-head { margin-bottom: 0; }
+.minimap .mm-head small { color: #CDBB92; font-weight: 400; }
+.minimap .mm-head .sp { flex: 1; }
+.minimap canvas { display: block; image-rendering: pixelated; cursor: crosshair; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0, 0, 0, .6); }
+.minimap .mm-legend { color: #CDBB92; margin-top: 4px; max-width: 288px; font-size: 11px; }
 .hud.bl { left: 26px; bottom: 26px; width: 300px; }
 .hud.br { right: 26px; bottom: 26px; width: 318px; }
 .hud.top { left: 50%; top: 22px; transform: translateX(-50%); align-items: center; }
@@ -257,6 +267,8 @@ select:disabled { opacity: .5; }
 .setup label { font-weight: 600; font-size: 12.5px; }
 .setup .radio { font-weight: 500; display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; }
 .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.modes.sizes { grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.modes.sizes .choice { padding: 8px 10px; }
 .choice {
   all: unset; cursor: pointer; display: flex; flex-direction: column; gap: 6px; padding: 12px 14px 14px; border-radius: 6px;
   border: 2px solid var(--ink); background: var(--grain), linear-gradient(180deg, #FFFCF5, #E9DECB);
@@ -303,6 +315,14 @@ textarea.persona { font: 13.5px/1.6 var(--font); color: var(--text); background:
 .devs li { padding: 2px 0; border-bottom: 1px dashed rgba(126, 102, 56, .3); }
 .devs .t { color: var(--brass-lo); font-variant-numeric: tabular-nums; margin-right: 4px; }
 .api summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.evalbox { margin: 8px 0 4px; border: 1px solid rgba(126, 102, 56, .35); border-radius: 6px; padding: 6px 10px; background: rgba(255, 252, 245, .45); }
+.evalbox > summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.evalbox[open] > summary { margin-bottom: 6px; }
+.evalout { font-size: 12.5px; }
+.evalout h4 { margin: 6px 0 4px; font-size: 13px; }
+.evalout p { margin: 4px 0; }
+.evalout p.warn { color: #8a5a00; }
+.evalout ul { margin: 4px 0 4px 18px; padding: 0; }
 .api pre { font: 11.5px/1.5 ui-monospace, Consolas, monospace; background: rgba(43, 38, 32, .07); padding: 8px 10px; border-radius: 5px; white-space: pre-wrap; margin: 6px 0 0; }
 .chips .chip { font-size: 12px; padding: 4px 9px 5px; }
 .opps { display: flex; flex-direction: column; gap: 8px; }

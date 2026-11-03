@@ -1,7 +1,8 @@
 // 全项目唯一允许出现随机源的文件（SPEC §12）。mulberry32 + 具名子流。
 // 流对象是普通 { s }，可被克隆/哈希/存档，因此能放进对局状态。
 
-export const STREAM = Object.freeze({ MAZE: 1, PLACE: 2, CHEST: 3, AI: 4 });
+// SCRIPT：脚本 api.random（按座位再分子流）；只新增编号，不影响已有各流
+export const STREAM = Object.freeze({ MAZE: 1, PLACE: 2, CHEST: 3, AI: 4, SCRIPT: 5 });
 
 export function subSeed(seed, k) {
   let h = (seed ^ Math.imul(k, 0x9E3779B1)) >>> 0;

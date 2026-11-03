@@ -7,17 +7,14 @@
 import { request as httpRequest } from 'node:http';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { PROVIDERS, checkBaseUrl, extraBody } from '../../server/providers.mjs';
+import { PROVIDERS, checkBaseUrl, extraBody, outputBudget } from '../../server/providers.mjs';
 import { chatCompletion, httpsUpstream } from '../../server/llm-relay.mjs';
 import { LOCAL_KEY_ID } from './vault.mjs';
 
+// 预设与服务器一致；本机模型（Ollama、LM Studio 等）走「自定义」填 http://127.0.0.1:端口/v1，可以不填 key。
 export const LOCAL_PROVIDERS = Object.freeze({
   ...PROVIDERS,
-  ollama: Object.freeze({
-    label: '本机模型（Ollama）', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', verified: false, local: true,
-    note: '不需要 key；先在本机运行 Ollama 并拉好模型（ollama pull 模型名）',
-  }),
-  custom: Object.freeze({ ...PROVIDERS.custom, note: '允许 https:// 公网地址，或本机 http://127.0.0.1:端口（LM Studio 等）' }),
+  custom: Object.freeze({ ...PROVIDERS.custom, note: '允许 https:// 公网地址，或本机 http://127.0.0.1:端口（Ollama：http://127.0.0.1:11434/v1，不用填 key）' }),
 });
 
 export const providerLabel = (id) => (LOCAL_PROVIDERS[id] ? LOCAL_PROVIDERS[id].label : id);
@@ -94,7 +91,6 @@ const API_KEY = /^[\x21-\x7e]{8,400}$/;
 const ROLES = new Set(['system', 'user', 'assistant']);
 const KINDS = new Set(['plan', 'repair', 'test']);
 const MAX_CHARS = 32000;
-const MAX_TOKENS = { normal: 400, reasoning: 4000 };
 const TIMEOUT = { min: 5000, normal: 40000, max: 90000 };
 
 const fail = (error, message) => ({ ok: false, error, message });
@@ -179,7 +175,7 @@ export function createDirect({ vault, ledgerFile, now, upstreams = {} }) {
       }
       if (chars > MAX_CHARS) return { ok: false, kind: 'bad', message: `messages 合计超过 ${MAX_CHARS} 字符` };
       const kind = KINDS.has(b.kind) ? b.kind : 'plan';
-      const maxTokens = Math.min(Number.isInteger(b.max_tokens) && b.max_tokens > 0 ? b.max_tokens : 200, k.reasoning ? MAX_TOKENS.reasoning : MAX_TOKENS.normal);
+      const maxTokens = outputBudget(k.provider, b.max_tokens, k.reasoning);
       const temperature = Number.isFinite(b.temperature) ? Math.min(1, Math.max(0, b.temperature)) : 0;
       const timeoutMs = Number.isFinite(b.timeoutMs) ? Math.min(TIMEOUT.max, Math.max(TIMEOUT.min, b.timeoutMs)) : TIMEOUT.normal;
       const r = await chatCompletion({

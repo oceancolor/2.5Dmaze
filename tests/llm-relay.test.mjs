@@ -19,7 +19,8 @@ import { createMatch } from '../src/core/state.js';
 import { CLIENT_VERSION } from '../src/app/version.js';
 import { openStore } from '../server/store/db.mjs';
 import { createApp } from '../server/app.mjs';
-import { checkBaseUrl, guardedLookup, isPublicAddress } from '../server/providers.mjs';
+import { checkBaseUrl, guardedLookup, isPublicAddress, extraBody, outputBudget, PROVIDERS } from '../server/providers.mjs';
+import { createLlmLog } from '../server/llm-log.mjs';
 import { createVault, keyHint } from '../server/vault.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -53,10 +54,10 @@ function fakeUpstream() {
   return fn;
 }
 
-async function boot({ dbPath = ':memory:', masterKey = randomBytes(32), upstream = fakeUpstream(), limits } = {}) {
+async function boot({ dbPath = ':memory:', masterKey = randomBytes(32), upstream = fakeUpstream(), limits, llmLog = null } = {}) {
   const store = await openStore(dbPath);
   let clock = 1_800_000_000_000;
-  const app = createApp({ store, root: ROOT, now: () => clock, upstream, options: { allowedOrigins: ['app://maze'], masterKey, limits } });
+  const app = createApp({ store, root: ROOT, now: () => clock, upstream, llmLog, options: { allowedOrigins: ['app://maze'], masterKey, limits } });
   const server = createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -104,6 +105,136 @@ test('SSRF：只放行 https 公网地址；内网 / 回环 / 链路本地 / 元
   assert.equal(await lookup('169.254.169.254', { all: true }), 'ESSRF');
   assert.equal(await lookup('localhost', { all: true }), 'ESSRF', 'DNS 解析到回环也拒绝（防 DNS 重绑定）');
   assert.deepEqual(await lookup('8.8.8.8', { all: true }), [{ address: '8.8.8.8', family: 4 }]);
+});
+
+test('服务商预设：只留 HY4 / K3 / DeepSeek V4.1 Flash / GLM-5.3 Flash（同一 MaaS 网关）+ 自定义；各家关思考写法与输出预算', () => {
+  const MAAS = 'https://tokenhub.tencentmaas.com/v1';
+  assert.deepEqual(Object.keys(PROVIDERS), ['hunyuan', 'kimi', 'deepseek', 'glm', 'custom']);
+  const models = { hunyuan: 'hy4-preview', kimi: 'kimi-k3', deepseek: 'deepseek-v4.1-flash', glm: 'glm-5.3-flash' };
+  for (const [id, model] of Object.entries(models)) {
+    assert.equal(PROVIDERS[id].baseUrl, MAAS, id);
+    assert.equal(PROVIDERS[id].model, model, id);
+  }
+  // 实测：HY4 / K3 / DeepSeek 认 thinking:disabled；GLM 对它回 400，只能 reasoning_effort:'low'
+  for (const id of ['hunyuan', 'kimi', 'deepseek']) {
+    assert.deepEqual(extraBody(id, false), { thinking: { type: 'disabled' } }, id);
+    assert.deepEqual(extraBody(id, true), {}, `${id} 勾推理模型才放开思考`);
+  }
+  assert.deepEqual(extraBody('glm', false), { reasoning_effort: 'low' });
+  assert.deepEqual(extraBody('glm', true), {});
+  assert.deepEqual(extraBody('custom', false), {});
+  assert.deepEqual(extraBody('moonshot', false), {}, '已下线的服务商不附加字段');
+
+  // 输出预算：请求值先抬到服务商下限，再按档位封顶
+  assert.equal(outputBudget('kimi', 200, false), 200);
+  assert.equal(outputBudget('kimi', 9999, false), 400);
+  assert.equal(outputBudget('kimi', 9999, true), 4000);
+  assert.equal(outputBudget('glm', 200, false), 1000, 'GLM 思考关不掉，给残余思考留余量');
+  assert.equal(outputBudget('glm', 4000, true), 4000);
+  assert.equal(outputBudget('custom', undefined, false), 200);
+});
+
+test('Kimi K3 测试连接：普通档关思考用 200 token；推理档放开思考并放宽到 4000 token / 90 秒', async () => {
+  const up = fakeUpstream();
+  const s = await boot({ upstream: up });
+  try {
+    const A = await s.guest();
+    for (const [reasoning, wantTokens, wantTimeout] of [[false, 200, 45000], [true, 4000, 90000]]) {
+      const saved = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'kimi', apiKey: SECRET, reasoning } });
+      assert.equal(saved.status, 201);
+      const t = await s.call('POST', `/api/v1/keys/${saved.json.keyId}/test`, { token: A, body: { autonomy: 'blend' } });
+      assert.equal(t.status, 200);
+      assert.equal(t.json.ok, true, t.json.error);
+      const c = up.calls.at(-1);
+      assert.equal(c.body.model, 'kimi-k3');
+      assert.equal(c.body.max_tokens, wantTokens);
+      assert.equal(c.timeoutMs, wantTimeout);
+      if (reasoning) assert.equal(c.body.thinking, undefined);
+      else assert.deepEqual(c.body.thinking, { type: 'disabled' });
+    }
+    // GLM：普通档带 reasoning_effort:'low'，输出预算抬到 1000；中转同样适用
+    const g = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'glm', apiKey: SECRET } });
+    await s.call('POST', `/api/v1/keys/${g.json.keyId}/test`, { token: A, body: {} });
+    assert.equal(up.calls.at(-1).body.reasoning_effort, 'low');
+    assert.equal(up.calls.at(-1).body.thinking, undefined);
+    assert.equal(up.calls.at(-1).body.max_tokens, 1000);
+    const relay = await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: g.json.keyId, matchId: mid(7), seat: 0, messages: openingMessages(), max_tokens: 200 } });
+    assert.equal(relay.status, 200);
+    assert.equal(up.calls.at(-1).body.max_tokens, 1000);
+  } finally {
+    await s.close();
+  }
+});
+
+test('对话日志：中转与测试连接逐行写 JSONL（按日期 / 对局分文件），含完整 messages 与回复；绝不含 key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maze-llmlog-'));
+  const llmLog = createLlmLog({ dir, now: () => 1_800_000_000_000 });
+  const s = await boot({ llmLog });
+  try {
+    const A = await s.guest();
+    const k = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'hunyuan', apiKey: SECRET } });
+    await s.call('POST', `/api/v1/keys/${k.json.keyId}/test`, { token: A, body: {} });
+    const M = mid(42);
+    const msgs = openingMessages();
+    assert.equal((await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: k.json.keyId, matchId: M, seat: 0, kind: 'plan', messages: msgs } })).status, 200);
+    s.upstream.set(() => ({ status: 401, text: '{"error":{"message":"bad key"}}' }));
+    assert.equal((await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: k.json.keyId, matchId: M, seat: 0, kind: 'repair', messages: msgs } })).status, 502);
+    await llmLog.flush();
+
+    const day = new Date(1_800_000_000_000).toISOString().slice(0, 10);
+    assert.deepEqual(readdirSync(join(dir, day)).sort(), [`${M}.jsonl`, '_test.jsonl'].sort());
+    const lines = readFileSync(join(dir, day, `${M}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(lines.length, 2);
+    const [ok, bad] = lines;
+    assert.equal(ok.matchId, M);
+    assert.equal(ok.seat, 0);
+    assert.equal(ok.kind, 'plan');
+    assert.equal(ok.model, 'hy4-preview');
+    assert.deepEqual(ok.request.messages, msgs, '完整 messages（system + 局面）');
+    assert.deepEqual(ok.request.extra, { thinking: { type: 'disabled' } });
+    assert.equal(typeof ok.reply, 'string');
+    assert.ok(ok.reply.length > 0);
+    assert.deepEqual(ok.usage, { in: 800, out: 35 });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.kind, 'repair');
+    assert.equal(bad.error.kind, 'auth');
+    const test0 = JSON.parse(readFileSync(join(dir, day, '_test.jsonl'), 'utf8').trim());
+    assert.equal(test0.kind, 'test');
+    assert.equal(test0.matchId, null);
+
+    for (const f of readdirSync(join(dir, day))) {
+      assert.ok(!readFileSync(join(dir, day, f), 'utf8').includes(SECRET), `${f} 不含 key`);
+    }
+  } finally {
+    await s.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('对话日志：超过保留天数的日期目录被清理；不配目录 = 关闭', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maze-llmlog-'));
+  try {
+    let t = Date.UTC(2026, 10, 2);
+    const log = createLlmLog({ dir, retentionDays: 30, now: () => t });
+    log.write({ matchId: mid(1), kind: 'plan' });
+    await log.flush();
+    const day1 = new Date(t).toISOString().slice(0, 10);
+    assert.deepEqual(readdirSync(dir), [day1]);
+    t += 29 * 86400000;
+    assert.equal(await log.prune(), 0, '29 天内保留');
+    t += 2 * 86400000;
+    assert.equal(await log.prune(), 1, '超过 30 天删除');
+    assert.deepEqual(readdirSync(dir), []);
+    log.write({ matchId: mid(2), kind: 'plan' });
+    await log.flush();
+    assert.deepEqual(readdirSync(dir), [new Date(t).toISOString().slice(0, 10)]);
+    const off = createLlmLog({ dir: null });
+    assert.equal(off.enabled, false);
+    off.write({ matchId: mid(3) });
+    await off.flush();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('vault：会话 key 只在内存、24 小时过期；「记住」= AES-256-GCM 密文入库，绑定用户与行，换主密钥解不开', async () => {
@@ -154,6 +285,10 @@ test('M1 HTTP：预设 → 存 key（不回显）→ 测试连接（示范决策
     assert.equal(hy.baseUrl, 'https://tokenhub.tencentmaas.com/v1');
     assert.equal(hy.model, 'hy4-preview');
     assert.equal(hy.verified, true);
+    const kimi = pv.json.items.find((p) => p.id === 'kimi');
+    assert.ok(kimi, '设置页下拉里要有 Kimi K3');
+    assert.equal(kimi.baseUrl, 'https://tokenhub.tencentmaas.com/v1');
+    assert.equal(kimi.model, 'kimi-k3');
 
     const A = await s.guest();
     const B = await s.guest();
