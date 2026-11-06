@@ -333,6 +333,7 @@ textarea.persona { font: 13.5px/1.6 var(--font); color: var(--text); background:
 .addkey > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--brass-lo); }
 .addkey[open] { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 5px; background: rgba(43, 38, 32, .05); }
 .addkey input[type=password] { font-family: ui-monospace, Consolas, monospace; }
+.addkey .keyhint { margin: 0; padding: 6px 9px; border-left: 3px solid var(--brass); background: rgba(255, 216, 77, .1); border-radius: 0 4px 4px 0; line-height: 1.55; }
 /* HUD「你的 AI」 */
 .aictl { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 4px; }
 .aictl .btn.mini { margin-right: 4px; }

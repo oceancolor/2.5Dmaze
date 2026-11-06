@@ -457,10 +457,11 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     : `<span class="k">${esc(pv.baseUrl)}</span>`}</div>
         <div class="row"><label>模型名</label><input data-f="kmodel" value="${esc(f.model)}" placeholder="${esc(pv.model || '必填')}" size="24">
           <label class="radio"><input type="checkbox" data-f="kreasoning"${f.reasoning ? ' checked' : ''}> 这是推理模型（先思考再回答，超时从 40 秒放宽到 85 秒）</label></div>
-        <div class="row"><label>API key</label><input type="password" data-f="kkey" autocomplete="off" spellcheck="false" size="34" placeholder="只在点按钮时发给游戏服务器一次">
+        <div class="row"><label>API key</label><input type="password" data-f="kkey" autocomplete="off" spellcheck="false" size="34" placeholder="腾讯云 TokenHub 的 sk-…">
           <label class="radio"><input type="checkbox" data-f="kremember"${f.remember && byok.canRemember ? ' checked' : ''}${byok.canRemember ? '' : ' disabled'}> 记住（服务器加密保存）</label>
           <button class="btn" data-a="kadd">保存并测试</button></div>
         <p class="k">${pv.note ? `${esc(pv.note)} · ` : ''}key 交给游戏服务器保管，页面不保存、不回显。默认「仅本次会话」：只在服务器内存里，24 小时后丢弃；勾「记住」则用 AES-256-GCM 加密后存进数据库${byok.canRemember ? '' : '（服务器未配置主密钥，暂不可用）'}。接口只返回服务商、模型名和尾号，随时可删。</p>
+        <p class="k keyhint"><b>填哪种 key：</b>预设的四个模型填<b>腾讯云 TokenHub 的 API Key</b>（在腾讯云控制台「TokenHub → API Key 管理」创建，<code>sk-</code> 开头；也就是你在 WorkBuddy「自定义模型」里填的那把），费用从你的腾讯云账户扣。<b>CodeBuddy / WorkBuddy 登录账号自带的积分不能用</b>：官方没有对第三方开放这部分额度，用非官方代理绕过有封号风险，游戏服务器也连不到你电脑上的代理。</p>
       </details>
       <div class="trial k" data-k="ktest">${byok.testHtml}</div>
       <p class="k" data-k="usage">${usageLine()}</p>`;
