@@ -1,8 +1,10 @@
 // docs/SPEC.md §14 —— config 键表的唯一来源。改数值须同步 SPEC。
 // 覆盖方式：makeConfig({ ...局部覆盖 })；未知键直接抛错（防拼写错误静默失效）。
 
+// SPEC-0.2（2026-11-06 批次 6）：视野全公开 + 大模型 harness（博弈事实表 / 会话记忆 / 目标队列 / 思考档位）。
+// 旧版 SPEC-0.1 的完整配置冻结在 legacy.js（服务器校验旧记录用），这里可以按新方案改。
 const DEFAULTS = {
-  rulesVersion: 'SPEC-0.1',
+  rulesVersion: 'SPEC-0.2',
 
   match: { playerSeat: 0, playerMode: 'manual' }, // manual | prompt | script | byok（05 模式 B：接入玩家自己的大模型）
 
@@ -62,13 +64,11 @@ const DEFAULTS = {
     },
   },
 
-  // 视野规则（2026-11-06 实验，src/config/vision-modes.js）：mode 缺省 = 'radius'（现行）。
-  // 三个新键缺省为 undefined —— configHash 跳过 undefined，所以默认配置的哈希与旧记录一致。
-  //   radius   对手只在切比雪夫 entityRadius 内实时可见，视野外给最后目击（现行）
-  //   full     所有在场对手的实时位置全公开（意图仍不公开）
-  //   delayed  视野内实时；视野外给 delayTurns 回合前的真实位置
-  //   radar    视野内实时；每 radarEvery 回合把全员当前位置广播一次
-  vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true, mode: undefined, delayTurns: undefined, radarEvery: undefined },
+  // 视野规则（2026-11-06 用户裁定，批次 6）：全公开 —— 所有在场对手的实时位置全公开，意图不公开。
+  // entityRadius 不再是「视野」，只作「近身范围」（启发式让行时把这个范围内的人当障碍）。
+  // 旧规则（radius / delayed / radar，src/config/vision-modes.js）只留给服务器校验旧记录：
+  //   mode: undefined = 旧 radius（configHash 跳过 undefined，所以旧记录的哈希不变）
+  vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true, mode: 'full', delayTurns: undefined, radarEvery: undefined },
 
   ai: {
     homeFactorX10: 13, // 终盘区 / 回家阈值：stamina*10 <= dist*13
@@ -104,12 +104,21 @@ const DEFAULTS = {
       maxOutputTokens: 200,
       repairMaxTokens: 150,
       promptSuffixMaxChars: 2000,
-      // 经服务器中转（05 §7.4）：客户端超时略短于服务器的上游超时（45 s / 90 s），由客户端判超时并修复一次。
-      // HY4 关闭思考实测（2026-10-29，经中转两局 39 次）：P50 ≈ 2.9 s、P90 ≈ 4.5 s，最慢 24.9 s、20.8 s。
-      // 客户端放弃的那次服务器照样等到上游回来、服务商照样计费；20 s 时那两次各补发一次修复，总等待反而更长（27–29 s）。
-      // 所以宁可多等：游戏在生效回合会等，放宽超时只让节奏变慢，不影响结果。
-      byokTimeoutMs: 40000,
-      byokReasoningTimeoutMs: 85000,
+      // 玩家自己的 AI（决策契约 v2：可带后续目标、放弃条件、≤ 300 字备忘），回答本身的输出预算
+      contractMaxTokens: 900,
+      // 经服务器中转（05 §7.4）：客户端超时略短于服务器的上游超时（按思考档位：45 / 75 / 150 s）。
+      // 游戏在生效回合会等，放宽超时只让节奏变慢，不影响结果；客户端放弃的那次服务器照样计费，所以宁可多等。
+      // 思考档位实测（2026-11-06，开局局面一次决策）：Kimi K3 低 2.8 s / 高 27 s；DeepSeek 低 13.6 s / 高 21 s；GLM 低 3.7 s / 高 37 s；HY4 开思考写不出答案，只能关。
+      byokTimeoutMs: { off: 40000, low: 70000, high: 145000 },
+    },
+    // 大模型 harness（批次 6）：一局一个会话，每次决策都带上「本局到目前为止」；跨局经验由模型赛后自己写、超长时自己压缩
+    harness: {
+      journalWindow: 8, // 会话里原样保留的最近决策条数（更早的折成摘要）
+      memoMaxChars: 300, // 模型留给下一次自己的备忘
+      thenMax: 2, // 决策可附带的后续目标数
+      trendTurns: 6, // 对手动向：比较最近这么多回合的位置变化
+      memoryMaxChars: 2000, // 跨局经验上限（超过时让模型压缩）
+      memoryTargetChars: 1200, // 写经验 / 压缩时要求的长度
     },
   },
 
@@ -202,7 +211,12 @@ export function validateConfig(c) {
 }
 
 export function makeConfig(overrides = {}) {
-  const c = mergeInto(structuredClone(DEFAULTS), overrides, '');
+  return makeConfigFrom(DEFAULTS, overrides);
+}
+
+/** 以指定的默认配置为底合并覆盖项（旧规则版本的配置快照用，见 legacy.js）。 */
+export function makeConfigFrom(base, overrides = {}) {
+  const c = mergeInto(structuredClone(base), overrides, '');
   validateConfig(c);
   return deepFreeze(c);
 }

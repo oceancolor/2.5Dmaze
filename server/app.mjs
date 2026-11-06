@@ -6,6 +6,7 @@
 //   /api/v1/providers        服务商预设（M1）
 //   /api/v1/keys[...]        玩家自己的 key：保存 / 列出 / 删除 / 测试连接（M1）
 //   /api/v1/usage            用量（M1）
+//   /api/v1/memory           玩家自己的 AI 的跨局经验（批次 6 harness）
 //   /llm/v1/chat             大模型中转：附上本人 key 调用服务商（M1，谁用谁付）
 //   其他                     开发模式下托管游戏静态文件；生产由反向代理直接给静态文件也行
 
@@ -13,6 +14,7 @@ import { HttpError, clientIp, createLimiter, selfOrigin, sendError, sendJson } f
 import { createGuest, getMe } from './api/accounts.mjs';
 import { getLlmLog, getMatch, getRecord, listMatches, uploadMatch } from './api/matches.mjs';
 import { createKey, deleteKey, getProviders, getUsage, listKeys, relayChat, testKey } from './api/llm.mjs';
+import { deleteMemory, getMemory, putMemory } from './api/memory.mjs';
 import { createVault } from './vault.mjs';
 import { RULES_VERSION } from './verifier.mjs';
 import { createStaticHandler } from './static.mjs';
@@ -114,6 +116,12 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
     if (p === '/api/v1/usage') {
       if (m !== 'GET') throw new HttpError(405, 'method_not_allowed', '只支持 GET');
       return getUsage(req, res, ctx);
+    }
+    if (p === '/api/v1/memory') {
+      if (m === 'GET') return getMemory(req, res, ctx);
+      if (m === 'PUT') return putMemory(req, res, ctx);
+      if (m === 'DELETE') return deleteMemory(req, res, ctx);
+      throw new HttpError(405, 'method_not_allowed', '只支持 GET / PUT / DELETE');
     }
     if (p === '/llm/v1/chat') {
       if (m !== 'POST') throw new HttpError(405, 'method_not_allowed', '只支持 POST');

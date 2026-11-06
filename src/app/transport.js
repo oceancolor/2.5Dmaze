@@ -11,13 +11,20 @@ import { now } from './clock.js';
 
 export const PROXY_URL = 'http://127.0.0.1:8787';
 
-/** 玩家自己的 AI（planner 传了 autonomy）用决策契约 v1 的提示词；对手 AI 用原来的。 */
-function messagesFor(req, cfg) {
-  const opts = req.autonomy ? { autonomy: req.autonomy, safetyGate: req.safetyGate, context: req.context } : {};
+/** 玩家自己的 AI（planner 传了 autonomy）用决策契约 v2 的提示词（含本局会话与跨局经验）；对手 AI 用原来的。 */
+export function messagesFor(req, cfg) {
+  const opts = req.autonomy
+    ? { autonomy: req.autonomy, safetyGate: req.safetyGate, context: req.context, session: req.session, memory: req.memory }
+    : {};
   return req.kind === 'repair'
     ? buildRepairMessages(req.payload, req.persona, cfg, req.raw, req.error, opts)
     : buildMessages(req.payload, req.persona, cfg, opts);
 }
+
+/** 思考档位（批次 6）：off / low / high，默认 low（玩家可改）。 */
+export const THINKING = Object.freeze(['off', 'low', 'high']);
+export const DEFAULT_THINKING = 'low';
+export const isThinking = (v) => THINKING.includes(v);
 
 /**
  * @param {{isFast?:()=>boolean, latency?:[number,number], onCall?:(info:object)=>void}} [o]
@@ -99,19 +106,23 @@ const RELAY_FAIL = {
 /**
  * 经游戏服务器中转（05 §7）。
  * @param {{cfg:object, call:(method:string, path:string, body:object, o:{signal:AbortSignal})=>Promise<{status:number, json:object|null, reason?:string}>,
- *          keyId:string, matchId:string, reasoning?:boolean, onCall?:(info:object)=>void}} o
- *   call：sync.call（带游客令牌）；onCall 收到 {seat, kind, source:'relay', ms, ok, usage?, error?}
+ *          keyId:string, matchId:string, thinking?:'off'|'low'|'high', onCall?:(info:object)=>void}} o
+ *   call：sync.call（带游客令牌）；onCall 收到 {seat, kind, source:'relay', ms, ok, usage?, error?, thinking?}
+ *   thinking：思考档位，服务器按服务商换成对应参数并放宽输出预算 / 超时（模型不支持时服务器降档，回复里的 thinking 是实际档位）
  */
-export function createRelayTransport({ cfg, call, keyId, matchId, reasoning = false, onCall = null }) {
+export function createRelayTransport({ cfg, call, keyId, matchId, thinking = DEFAULT_THINKING, onCall = null }) {
   const L = cfg.ai.llm;
-  const timeoutMs = reasoning ? L.byokReasoningTimeoutMs : L.byokTimeoutMs;
+  const level = isThinking(thinking) ? thinking : DEFAULT_THINKING;
+  const timeoutMs = L.byokTimeoutMs[level];
   return (req, reply) => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     const t0 = now();
+    // 答案本身的预算：契约 v2（可带 then / memo）给 contractMaxTokens；思考 token 由服务器按档位另加
+    const answer = req.autonomy ? L.contractMaxTokens : L.maxOutputTokens;
     const body = {
-      keyId, matchId, seat: req.seat, kind: req.kind, messages: messagesFor(req, cfg),
-      max_tokens: req.kind === 'repair' ? L.repairMaxTokens : L.maxOutputTokens, temperature: L.temperature,
+      keyId, matchId, seat: req.seat, kind: req.kind, messages: messagesFor(req, cfg), thinking: level,
+      max_tokens: req.kind === 'repair' ? Math.max(L.repairMaxTokens, answer) : answer, temperature: L.temperature,
     };
     // 导出对话用：本次请求的完整 messages 与触发信息（不含 key：客户端本来就没有 key）
     const exchange = { id: req.id, requestTurn: req.requestTurn, appliedTurn: req.appliedTurn, why: req.why ?? null, messages: body.messages };
@@ -121,7 +132,10 @@ export function createRelayTransport({ cfg, call, keyId, matchId, reasoning = fa
     };
     call('POST', '/llm/v1/chat', body, { signal: ctl.signal }).then((r) => {
       if (r.status === 200 && r.json) {
-        done({ ok: true, usage: r.json.usage ?? null, model: r.json.model, finish: r.json.finish ?? null, text: String(r.json.text ?? '') });
+        done({
+          ok: true, usage: r.json.usage ?? null, model: r.json.model, finish: r.json.finish ?? null, text: String(r.json.text ?? ''),
+          thinking: r.json.thinking ?? level, ...(r.json.reasoning ? { reasoning: String(r.json.reasoning) } : {}),
+        });
         reply.deliver(String(r.json.text ?? ''));
         return;
       }

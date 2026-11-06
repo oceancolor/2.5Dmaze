@@ -1,22 +1,45 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CFG } from './helpers.mjs';
+import { makeConfig } from '../src/config/default.config.js';
+import { matchOverrides } from '../src/config/map-sizes.js';
 import { createMatch } from '../src/core/state.js';
 import { observe } from '../src/core/observe.js';
 import { cheb } from '../src/core/geom.js';
 import { fieldFrom } from '../src/core/nav/bfs.js';
 import { runMatch } from '../src/sim/headless.js';
 
-test('视野：只有切比雪夫 R 内的在场对手给出坐标，视野外不泄露当前坐标', () => {
-  const R = CFG.vision.entityRadius;
+test('视野（批次 6 全公开）：所有在场对手都给实时坐标；已离场的不给', () => {
   const { map } = createMatch(3, CFG);
   let visible = 0;
-  let hidden = 0;
   runMatch(3, CFG, {
     onTurn(prev) {
       for (let i = 0; i < 4; i++) {
         if (prev.actors[i].status !== 'active') continue;
         const o = observe(map, prev, i, CFG, { patch: false });
+        for (const e of o.actors) {
+          const a = prev.actors[e.seat];
+          assert.equal(e.visible, a.status === 'active');
+          if (e.visible) { visible++; assert.deepEqual([e.x, e.y], [a.x, a.y]); }
+          else assert.ok(!('x' in e) && !('y' in e));
+        }
+      }
+    },
+  });
+  assert.ok(visible > 0);
+});
+
+test('旧规则（只用于校验旧记录）：只有切比雪夫 R 内的在场对手给出坐标，视野外不泄露当前坐标', () => {
+  const OLD = makeConfig(matchOverrides('manual', 'XL', 'radius'));
+  const R = OLD.vision.entityRadius;
+  const { map } = createMatch(3, OLD);
+  let visible = 0;
+  let hidden = 0;
+  runMatch(3, OLD, {
+    onTurn(prev) {
+      for (let i = 0; i < 4; i++) {
+        if (prev.actors[i].status !== 'active') continue;
+        const o = observe(map, prev, i, OLD, { patch: false });
         for (const e of o.actors) {
           const a = prev.actors[e.seat];
           const inRange = a.status === 'active' && cheb(a.x, a.y, prev.actors[i].x, prev.actors[i].y) <= R;

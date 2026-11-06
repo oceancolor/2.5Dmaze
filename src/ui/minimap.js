@@ -255,11 +255,9 @@ export function createMinimap(host, { map, cfg, onLook }) {
       ctx.stroke();
       ctx.restore();
 
+      // 批次 6：对局一律全公开；旧规则只会在回放旧记录时出现
       const VM = cfg.vision.mode ?? 'radius';
-      const rule = VM === 'full' ? '全公开：所有对手实时显示'
-        : VM === 'delayed' ? `视野 ${cfg.vision.entityRadius} 格内实时 · 更远显示 ${cfg.vision.delayTurns} 回合前的位置`
-          : VM === 'radar' ? `视野 ${cfg.vision.entityRadius} 格内实时 · 每 ${cfg.vision.radarEvery} 回合雷达广播`
-            : `对手只在视野 ${cfg.vision.entityRadius} 格内实时显示`;
+      const rule = VM === 'full' ? '所有对手实时显示 · 他们要去哪得你自己判断' : `旧记录：对手只在视野 ${cfg.vision.entityRadius} 格内实时显示`;
       const lg = god ? '观战：显示全部对手' : `${rule}${ghosts ? ' · 半透明 = 已知的旧位置' : ''}`;
       if (lg !== lastLegend) {
         legend.textContent = lg;

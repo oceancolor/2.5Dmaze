@@ -11,62 +11,88 @@ import { isIP } from 'node:net';
 /**
  * 预设：四个模型都在腾讯 MaaS 网关上，共用同一把凭证（2026-11-02 真凭证实测）；另留「自定义（OpenAI 兼容）」。
  * verified：已用真实凭证跑通过「测试连接」。
- * extra(reasoning)：附加到请求体的字段，用来关掉 / 压低思考。不压的话 completion_tokens 含思考 token，
- *   200 的输出预算会被思考吃光、content 为空（K3 实测）。各家写法不同，网关对不认识的写法直接 400：
- *   HY4 / K3 / DeepSeek 认 thinking:{type:'disabled'}（关掉后 reasoning_tokens = 0）；
- *   GLM 关不掉（thinking:disabled、reasoning_effort:none / minimal 都 400），最低只能 reasoning_effort:'low'。
- * outputFloor：普通档的输出预算下限。思考关不掉的模型要给残余思考留余量，否则答案被截断。
+ *
+ * 思考档位 think[off|low|high]（批次 6，玩家可选，默认 low）：附加到请求体的字段；null = 该模型不支持这一档，降为 off。
+ *   不压思考时 completion_tokens 含思考 token，答案的输出预算会被思考吃光、content 为空（K3 实测），所以 off 一律显式关。
+ *   各家写法不同，网关对不认识的写法直接 400。2026-11-06 开局局面一次决策实测：
+ *     HY4      effort low 77 s / 2.5k 思考 token；high / enabled 3000 token 写不完答案 → 只能关
+ *     Kimi K3  effort high 2.5 s / 35 token；thinking enabled 53 s / 2.1k token；
+ *              thinking:disabled 与 effort none 都 400（11-02 时 disabled 还能用），最低只能 effort low（~20 token 残余思考）
+ *     DeepSeek effort low 5.7 s / 450 token；effort high 5.9 s / 490 token
+ *     GLM      关不掉（thinking:disabled、effort none / minimal 都 400），effort low 只剩 ~8 token 当作关；
+ *              effort high 4.1 s / 100 token；thinking enabled 10 s / 640 token
+ * outputFloor：off 档的输出预算下限（思考关不掉的模型给残余思考留余量）。
  */
 const MAAS = 'https://tokenhub.tencentmaas.com/v1';
-const disableThinking = (reasoning) => (reasoning ? {} : { thinking: { type: 'disabled' } });
-const lowEffort = (reasoning) => (reasoning ? {} : { reasoning_effort: 'low' });
+const OFF = Object.freeze({ thinking: { type: 'disabled' } });
+const ENABLED = Object.freeze({ thinking: { type: 'enabled' } });
+const effort = (e) => Object.freeze({ reasoning_effort: e });
 
 export const PROVIDERS = Object.freeze({
   hunyuan: Object.freeze({
     label: '腾讯混元 HY4', baseUrl: MAAS, model: 'hy4-preview', verified: true,
-    note: '关闭思考：每次决策约 3 秒、输入约 1k token、输出约 35 token',
-    extra: disableThinking,
+    note: '只能关闭思考（开了要 1 分钟以上、经常写不出答案）：每次决策约 3 秒',
+    think: { off: OFF, low: null, high: null },
   }),
   kimi: Object.freeze({
     label: 'Kimi K3', baseUrl: MAAS, model: 'kimi-k3', verified: true,
-    note: '关闭思考：每次决策约 2.5 秒、输出约 36 token。勾「这是推理模型」则先思考（约 22 秒、500 token）',
-    extra: disableThinking,
+    note: '思考关不掉（2026-11-06 起网关拒收 thinking:disabled），「关」= 压到最低；关 ≈ 2 秒 · 低 ≈ 3 秒 · 高 ≈ 50 秒（每次决策）',
+    think: { off: effort('low'), low: effort('high'), high: ENABLED },
+    outputFloor: 1000,
   }),
   deepseek: Object.freeze({
     label: 'DeepSeek V4.1 Flash', baseUrl: MAAS, model: 'deepseek-v4.1-flash', verified: true,
-    note: '关闭思考：每次决策约 1.5 秒、输出约 35 token',
-    extra: disableThinking,
+    note: '思考 关 ≈ 1.5 秒 · 低 ≈ 6 秒 · 高 ≈ 6 秒（每次决策）',
+    think: { off: OFF, low: effort('low'), high: effort('high') },
   }),
   glm: Object.freeze({
     label: 'GLM-5.3 Flash', baseUrl: MAAS, model: 'glm-5.3-flash', verified: true,
-    note: '思考关不掉、只能压到 low：每次决策约 12 秒；输出预算自动放宽到 1000 token 给残余思考留余量',
-    extra: lowEffort,
+    note: '思考关不掉，「关」= 压到最低；关 ≈ 2–12 秒 · 低 ≈ 4 秒 · 高 ≈ 10 秒（每次决策）',
+    think: { off: effort('low'), low: effort('high'), high: ENABLED },
     outputFloor: 1000,
   }),
-  custom: Object.freeze({ label: '自定义（OpenAI 兼容）', baseUrl: '', model: '', verified: false, note: '只允许 https:// 公网地址' }),
+  custom: Object.freeze({ label: '自定义（OpenAI 兼容）', baseUrl: '', model: '', verified: false, note: '只允许 https:// 公网地址；思考档位无法控制，按「这是推理模型」勾选放宽预算' }),
 });
 
+export const THINKING = Object.freeze(['off', 'low', 'high']);
+export const DEFAULT_THINKING = 'low';
+
 export function providerList() {
-  return Object.entries(PROVIDERS).map(([id, p]) => ({ id, label: p.label, baseUrl: p.baseUrl, model: p.model, verified: p.verified, note: p.note ?? '' }));
+  return Object.entries(PROVIDERS).map(([id, p]) => ({
+    id, label: p.label, baseUrl: p.baseUrl, model: p.model, verified: p.verified, note: p.note ?? '',
+    thinking: p.think ? THINKING.filter((l) => p.think[l]) : ['off'],
+  }));
 }
 
-export function extraBody(providerId, reasoning) {
-  const p = PROVIDERS[providerId];
-  return p && p.extra ? p.extra(Boolean(reasoning)) : {};
-}
-
-/** 输出预算上限：普通档 400、推理档 4000；思考关不掉的模型普通档抬到它的 outputFloor。 */
-export const OUTPUT_CAP = Object.freeze({ normal: 400, reasoning: 4000 });
+/** 思考 token 的额外预算与上游超时（按实际档位）。 */
+export const THINK_BUDGET = Object.freeze({ off: 0, low: 3000, high: 7000 });
+export const ANSWER_CAP = 1200;
+export const RELAY_TIMEOUT_MS = Object.freeze({ off: 45000, low: 75000, high: 150000 });
 
 /**
- * 实际发给上游的 max_tokens：请求值先抬到服务商下限，再按档位封顶。
- * 服务器中转与桌面端本机直连共用这条规则。
+ * 某把 key 在某个思考档位下实际怎么调：
+ *   level     实际档位（模型不支持时降为 off；自定义按 key 的「推理模型」勾选：勾了视为 high、否则 off）
+ *   extra     附加到请求体的字段
+ *   maxTokens 答案预算（请求值，≤ 1200）+ 思考预算；off 档抬到服务商下限
+ *   timeoutMs 上游超时
+ * 服务器中转、测试连接与桌面端本机直连共用。
  */
-export function outputBudget(providerId, requested, reasoning) {
-  const floor = (PROVIDERS[providerId] && PROVIDERS[providerId].outputFloor) || 0;
-  const cap = reasoning ? OUTPUT_CAP.reasoning : Math.max(OUTPUT_CAP.normal, floor);
-  const want = Number.isInteger(requested) && requested > 0 ? requested : 200;
-  return Math.min(Math.max(want, floor), cap);
+export function thinkingPlan(providerId, requestedLevel, { requested, reasoning = false } = {}) {
+  const p = PROVIDERS[providerId];
+  const want = THINKING.includes(requestedLevel) ? requestedLevel : DEFAULT_THINKING;
+  let level;
+  let extra;
+  if (p && p.think) {
+    level = p.think[want] ? want : 'off';
+    extra = { ...p.think[level] };
+  } else {
+    level = reasoning ? 'high' : 'off';
+    extra = {};
+  }
+  const answer = Math.min(Number.isInteger(requested) && requested > 0 ? requested : 200, ANSWER_CAP);
+  const floor = (p && p.outputFloor) || 0;
+  const maxTokens = level === 'off' ? Math.max(answer, floor) : answer + THINK_BUDGET[level];
+  return { level, requested: want, extra, maxTokens, timeoutMs: RELAY_TIMEOUT_MS[level] };
 }
 
 function v4Public(ip) {

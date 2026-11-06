@@ -11,7 +11,7 @@
 import { DEFAULT_CONFIG } from './default.config.js';
 import { DEFAULT_VISION, visionOverrides } from './vision-modes.js';
 
-const BASE = DEFAULT_CONFIG;
+const BASE = DEFAULT_CONFIG; // MAP_SIZES 的显示值用当前默认配置
 
 /** 逐档表：只放需要逐档定的值，其余由 f 推导。 */
 const TABLE = Object.freeze({
@@ -39,8 +39,12 @@ export function isMapSize(id) {
 
 const scaled = (v, f, min) => Math.max(min, Math.round(v * f));
 
-/** @param {string} id XS|S|M|L|XL  @returns {object} makeConfig 覆盖项（不含 match） */
-export function sizeOverrides(id = DEFAULT_MAP_SIZE) {
+/**
+ * @param {string} id XS|S|M|L|XL
+ * @param {object} [BASE] 按哪份默认配置推导（旧规则版本的快照传自己的底，见 legacy.js）
+ * @returns {object} makeConfig 覆盖项（不含 match）
+ */
+export function sizeOverrides(id = DEFAULT_MAP_SIZE, BASE = DEFAULT_CONFIG) {
   if (!isMapSize(id)) throw new Error(`unknown map size ${id}`);
   if (id === 'XL') return {};
   const t = TABLE[id];
@@ -89,10 +93,9 @@ export function sizeOverrides(id = DEFAULT_MAP_SIZE) {
   };
 }
 
-/** 合并玩家模式与规格的覆盖项（客户端开局与服务器白名单共用，保证同一份配置 → 同一个哈希）。 */
 /**
  * 合并玩家模式、地图规格与视野规则的覆盖项（客户端开局与服务器白名单共用，保证同一份配置 → 同一个哈希）。
- * vision 缺省 radius（现行）→ 不加任何覆盖，哈希与引入视野规则前一致。
+ * vision 缺省 full（批次 6 起唯一的对局规则，即默认配置本身）→ 不加覆盖；其他值只用于实验工具。
  */
 export function matchOverrides(playerMode, mapSize = DEFAULT_MAP_SIZE, vision = DEFAULT_VISION) {
   const size = sizeOverrides(mapSize);

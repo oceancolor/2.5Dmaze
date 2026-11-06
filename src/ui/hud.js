@@ -14,6 +14,9 @@ import { rankActors, scoreOf, setsOf, gemTotal } from '../core/scoring.js';
 import { estimateTurnsLeft, estimateSeconds } from '../app/scheduler.js';
 import { MAPPINGS } from '../player/input.js';
 import { AUTONOMY, FOLLOW_ZH } from '../ai/codec.js';
+import { outcomeText, targetLabel, whyText } from '../ai/harness.js';
+
+export const THINK_ZH = Object.freeze({ off: '关', low: '低', high: '高' });
 
 export const SEAT_NAMES = Object.freeze(['你', 'AI-A', 'AI-B', 'AI-C']);
 const HOME_COLORS = { ok: '#3FBF6A', warn: '#F2CE3B', bad: '#E8384F' };
@@ -87,9 +90,10 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       <div class="bar" data-k="bar"><i></i><i></i><i></i><i></i></div>
       <div class="note" data-k="note"></div>`, 'stam'))}`;
   const s0 = seats[0];
+  // 「你的 AI / Agent」面板也是半透明（2026-11-06 批次 4），与小地图、记分牌、宝石区、动态广播一致
   const agentBox = s0 && s0.label !== '手动'
-    ? fx(frame(`<div class="k">${s0.byok ? '你的 AI' : '你的 Agent'} · <b data-k="agentkind">${esc(s0.label)}</b>${s0.byok && s0.persona ? ` · ${esc(s0.persona)}` : ''}</div>
-        <div class="agent" data-k="agent"></div><div class="aictl" data-k="aictl"></div><ol class="console" data-k="console"></ol>`, 'agentbox'))
+    ? frame(`<div class="k">${s0.byok ? '你的 AI' : '你的 Agent'} · <b data-k="agentkind">${esc(s0.label)}</b>${s0.byok && s0.persona ? ` · ${esc(s0.persona)}` : ''}</div>
+        <div class="agent" data-k="agent"></div><div class="aictl" data-k="aictl"></div><ol class="console" data-k="console"></ol>`, 'agentbox glass')
     : '';
   bl.innerHTML = `${agentBox}${frame(`<div class="k" data-k="gemhead"></div>
       <div class="gems" data-k="gems"></div>
@@ -145,6 +149,8 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
   let lastKey = '';
   let syncLine = '';
   let compareLine = '';
+  let memoryLine = '';
+  let memoryText = '';
   let toastTimer = 0;
   let exitField = null;
   let fieldMap = null;
@@ -222,7 +228,43 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       ${devs.length ? `<details><summary>偏离 / 部分的理由（${devs.length} 条，按回合）</summary><ol class="devs">${devs.map((d) => `<li><span class="t">T${d.n}</span>
         <em class="chip ${FOLLOW_CHIP[d.follow]}">${FOLLOW_ZH[d.follow]}</em> ${esc(d.deviation || '（没写理由）')} <span class="k">→ ${TARGET_ZH[d.targetType] ?? ''} (${d.target.x}, ${d.target.y})</span></li>`).join('')}</ol></details>` : ''}
       <p class="k" data-k="compare">${esc(compareLine)}</p>
+      ${timelineHtml(arguments[0])}
+      <p class="k memline" data-k="memory">${esc(memoryLine)}</p>
+      <details class="memtext" data-k="memtext"${memoryText ? '' : ' hidden'}><summary>查看新的经验</summary><pre>${esc(memoryText)}</pre></details>
     </div>`;
+  }
+
+  const OUT_CLASS = { got: 'ok', home: 'ok', lost: 'bad', abandoned: 'warn', guard: 'warn', invalid: 'bad', failed: 'bad', stale: 'k', switched: 'k', open: 'k' };
+  const SRC_ZH = { queue: '队列', guard: '闸门', 'llm-repair': '修复后' };
+
+  /** 决策复盘时间线（批次 6）：每次决策一行——触发、目标、理由 / 备忘、遵循、结局；损失最大的几次标红；有思考过程的可以展开。 */
+  function timelineHtml({ timeline: tl, talk = [], thinking, memory }) {
+    if (!tl || !tl.entries.length) return '';
+    const s = tl.stats;
+    const worst = new Set(tl.mistakes.map((m) => m.n * 10 + (m.req ?? 0)));
+    const think = new Map();
+    for (const c of talk) if (c.ok && c.reasoning && c.kind !== 'memory') think.set(c.requestTurn, c.reasoning);
+    const rows = tl.entries.map((e) => {
+      const bad = worst.has(e.n * 10 + (e.req ?? 0));
+      const why = SRC_ZH[e.src] || whyText(e.why) || '';
+      const fol = e.follow ? `<em class="chip ${FOLLOW_CHIP[e.follow]}">${FOLLOW_ZH[e.follow]}</em>` : '';
+      const extra = [
+        e.reason ? esc(e.reason) : '',
+        e.deviation ? `<span class="k">偏离理由：${esc(e.deviation)}</span>` : '',
+        e.then ? `<span class="k">+${e.then} 个后续目标</span>` : '',
+        e.abandonIf ? `<span class="k">放弃条件：对手近 ≥ ${e.abandonIf.rivalLeadBy} 步</span>` : '',
+        e.memo ? `<span class="k">备忘：${esc(e.memo)}</span>` : '',
+        e.err && e.outcome !== 'abandoned' ? `<span class="k">${esc(e.err)}</span>` : '',
+      ].filter(Boolean).join(' · ');
+      const th = think.get(e.req) && (e.src === 'llm' || e.src === 'llm-repair')
+        ? `<details class="think"><summary>思考过程</summary><pre>${esc(think.get(e.req))}</pre></details>` : '';
+      return `<tr class="${bad ? 'worst' : ''}"><td>T${e.n}</td><td class="k">${esc(why)}</td><td>${esc(e.target ? targetLabel(e) : '—')}</td>
+        <td>${fol} ${extra}${th}</td><td class="${OUT_CLASS[e.outcome] || ''}">${esc(outcomeText(e))}</td></tr>`;
+    }).join('');
+    return `<details class="timeline" open><summary>决策复盘（${s.decisions} 次决策 · 拿到 ${s.got} · 被抢 ${s.lost} · 放弃 ${s.abandoned} · 白跑 ${s.wasted} 步${thinking ? ` · 思考 ${THINK_ZH[thinking] || thinking}` : ''}${memory ? ` · 开局带了 ${memory.games} 局经验` : ''}）</summary>
+      ${tl.mistakes.length ? `<p class="k">损失最大：${tl.mistakes.map((m) => esc(m.text)).join('；')}</p>` : ''}
+      <div class="tlwrap"><table class="hist tl"><tr><th>回合</th><th>触发</th><th>目标</th><th>理由 / 备忘</th><th>结局</th></tr>${rows}</table></div>
+    </details>`;
   }
 
   function seatRows(sched, follow, god) {
@@ -442,6 +484,8 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       const rows = rankActors(s.actors, cfg);
       const champ = rows.filter((r) => r.champion).map((r) => SEAT_NAMES[r.seat]);
       compareLine = mine ? '对比：用同一张图、同样的对手跑一遍启发式代打…' : '';
+      memoryLine = '';
+      memoryText = '';
       end.innerHTML = frame(`
         <h2>对局结束 · 第 ${s.endTurn} 回合</h2>
         <p class="k">${champ.length ? `冠军：${champ.join('、')}${champ.length > 1 ? '（并列）' : ''}` : '无人到达出口，冠军空缺'} · 种子 ${esc(sched.match.seed)}${poolStats ? ` · 大模型调用 ${poolStats.total} 次${poolStats.l3 ? `（熔断：${esc(poolStats.l3)}）` : ''}` : ''}</p>
@@ -462,6 +506,19 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
         <div class="k sync" data-k="sync">${esc(syncLine)}</div>`, 'lg');
       end.hidden = false;
       lastKey = '';
+    },
+
+    /** 赛后写经验的状态（批次 6）；text = 新经验全文（写成时）。 */
+    setMemory(line, text = '') {
+      memoryLine = line || '';
+      memoryText = text || '';
+      const el = end.querySelector('[data-k="memory"]');
+      if (el) el.textContent = memoryLine;
+      const d = end.querySelector('[data-k="memtext"]');
+      if (d) {
+        d.hidden = !memoryText;
+        d.querySelector('pre').textContent = memoryText;
+      }
     },
 
     /** 结算卡上「与启发式代打对比」一行（main 算完后填）。 */

@@ -19,8 +19,8 @@ const HELP = `maze-eval —— 迷宫寻宝脚本整局评测（统一编程接�
   --seat0..--seat3 <x>   各座位：heuristic | mock:<balanced|setHunter|chest|cautious|bold> | script:<路径>
                          默认：座位 0 = --script，座位 1–3 = heuristic
   --size <XS|S|M|L|XL>   地图规格，默认 XS
-  --vision <radius|full|delayed|radar>
-                         视野规则（实验），默认 radius（现行）：full 全公开 / delayed 视野外延迟 5 回合 / radar 每 15 回合广播
+  --vision <full|radius|delayed|radar>
+                         视野规则，默认 full（全公开，唯一的对局规则）；radius / delayed / radar 只用于复现旧规则下的对比
   --seeds <范围>         如 1-20、1,5,9、abc（字符串种子），默认 1-20
   --budget <measure|enforce>
                          measure（默认）：不打断，只统计按正式预算会超时的回合，结果可复现
@@ -34,7 +34,7 @@ const HELP = `maze-eval —— 迷宫寻宝脚本整局评测（统一编程接�
 预算：每回合 50 ms + 时间银行（上限 5000 ms），init 2000 ms。`;
 
 function parseArgs(argv) {
-  const o = { size: 'XS', vision: 'radius', seeds: '1-20', budget: 'measure', format: 'md', worst: 5, baseline: true, records: null, script: null, seats: [null, null, null, null] };
+  const o = { size: 'XS', vision: 'full', seeds: '1-20', budget: 'measure', format: 'md', worst: 5, baseline: true, records: null, script: null, seats: [null, null, null, null] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => {

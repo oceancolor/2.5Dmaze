@@ -6,19 +6,77 @@
 // 设置存 localStorage（maze.setup.v1）。API key 绝不进 localStorage / 设置对象：只在点「保存」时从输入框读一次发给服务器，随即清空。
 
 import { PERSONAS } from '../ai/mock-llm.js';
-import { AUTONOMY, FOLLOW_ZH } from '../ai/codec.js';
+import { AUTONOMY, FOLLOW_ZH, buildMessages, buildPayload } from '../ai/codec.js';
+import { createMatch } from '../core/state.js';
+import { observe } from '../core/observe.js';
+import { THINKING, DEFAULT_THINKING, isThinking } from '../app/transport.js';
+import { memoryScope } from '../app/coach.js';
+import { estimateTrial, trialMarkdown } from '../player/eval/llm-eval.js';
+import { fnv1a, hex8 } from '../core/hash.js';
 import { SCRIPT_TEMPLATE, SCRIPT_EXAMPLES } from '../player/script-host.js';
 import { BUILTINS, ORIGINS, parseHeader, withHeader } from '../player/library.js';
-import { buildBrief } from '../player/brief.js';
+import { buildBrief, buildStrategyBrief } from '../player/brief.js';
 import { BUDGET } from '../player/runtime/budget.js';
 import { MAPPINGS } from '../player/input.js';
 import { MAP_SIZES, MAP_SIZE_IDS, DEFAULT_MAP_SIZE, isMapSize, matchOverrides } from '../config/map-sizes.js';
-import { VISION_IDS, VISION_PRESETS, DEFAULT_VISION, isVision, visionText } from '../config/vision-modes.js';
+import { VISION_PRESETS, visionText } from '../config/vision-modes.js';
 import { makeConfig } from '../config/default.config.js';
 import { ACTOR_COLORS } from '../render/palette.js';
-import { esc, frame, SEAT_NAMES, tokensText } from './hud.js';
+import { esc, frame, SEAT_NAMES, THINK_ZH, tokensText } from './hud.js';
 
 const KEY = 'maze.setup.v1';
+const MEMORY_MAX = makeConfig().ai.harness.memoryMaxChars;
+
+/** 思路库（本机 localStorage）：每版思路一条，记下最近一次试跑的成绩，方便比较「哪版思路真的更好」。 */
+const STRAT_KEY = 'maze.strategies.v1';
+function createStrategyLibrary() {
+  const load = () => {
+    try {
+      const a = JSON.parse(localStorage.getItem(STRAT_KEY) || '[]');
+      return Array.isArray(a) ? a.filter((e) => e && typeof e.text === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+  const store = (list) => {
+    try {
+      localStorage.setItem(STRAT_KEY, JSON.stringify(list.slice(0, 50)));
+    } catch { /* 隐私模式 */ }
+  };
+  const idOf = (text) => `st_${hex8(fnv1a(text.trim()))}`;
+  return {
+    list: () => load().sort((a, b) => b.updatedAt - a.updatedAt),
+    get: (id) => load().find((e) => e.id === id) || null,
+    save(name, text) {
+      const t = String(text || '').trim();
+      if (!t) return { error: '思路是空的' };
+      const list = load();
+      const id = idOf(t);
+      const prev = list.find((e) => e.id === id);
+      const e = { id, name: String(name || '').trim().slice(0, 30) || (prev ? prev.name : `思路 ${list.length + 1}`), text: t.slice(0, 2000), lastTrial: prev ? prev.lastTrial : null, updatedAt: Date.now() };
+      store([e, ...list.filter((x) => x.id !== id)]);
+      return e;
+    },
+    remove(id) {
+      store(load().filter((e) => e.id !== id));
+    },
+    /** 试跑完成后记成绩（这版思路还不在库里就自动存一条）。 */
+    noteTrial(text, summary) {
+      const t = String(text || '').trim();
+      if (!t) return;
+      const list = load();
+      const id = idOf(t);
+      const prev = list.find((e) => e.id === id);
+      const e = { id, name: prev ? prev.name : `思路 ${list.length + 1}`, text: t.slice(0, 2000), updatedAt: Date.now(), lastTrial: { ...summary, at: Date.now() } };
+      store([e, ...list.filter((x) => x.id !== id)]);
+    },
+  };
+}
+const THINK_DESC = Object.freeze({
+  off: '不思考，最快最省；只靠局面和博弈事实表直接选',
+  low: '先想一小会儿再答（默认）；推理更强的模型开始拉开差距',
+  high: '充分思考；每次决策可能要几十秒，费用明显更高',
+});
 
 export const BRAINS = Object.freeze({
   mock: '模拟大模型',
@@ -33,12 +91,13 @@ export function defaultSetup() {
     speed: 2,
     mapping: 'grid',
     mapSize: DEFAULT_MAP_SIZE,
-    vision: DEFAULT_VISION,
     evalRuns: 20,
     player: {
       mode: 'manual', code: SCRIPT_TEMPLATE, persona: PERSONAS.balanced.text, llm: 'mock',
       // 模式 B：keyId 只是服务器上那把 key 的编号（不是 key 本身）；keyMeta 只有服务商 / 模型名
       keyId: '', keyMeta: null, autonomy: 'blend', safetyGate: true, callCap: 0,
+      // harness（批次 6）：思考档位默认「低」；跨局经验默认带上并在赛后自动更新
+      thinking: DEFAULT_THINKING, useMemory: true, autoMemory: true,
       // 脚本（v2）：编辑器里的脚本说明；scriptId = 正在编辑的脚本库条目（'' = 未保存）；brief = 写给 agent 的要求
       scriptName: '我的脚本', scriptAuthor: '', scriptOrigin: 'human', scriptId: '', brief: '',
     },
@@ -64,7 +123,8 @@ export function loadSetup() {
     // 「提示词 Agent」已下线（内核仍认 prompt，旧记录照常校验）：存档里的 prompt 改回手打
     if (!MODES.some((m) => m.id === out.player.mode)) out.player.mode = 'manual';
     if (!isMapSize(out.mapSize)) out.mapSize = DEFAULT_MAP_SIZE;
-    if (!isVision(out.vision)) out.vision = DEFAULT_VISION;
+    delete out.vision; // 批次 6：视野规则不再可选（全公开）
+    if (!isThinking(out.player.thinking)) out.player.thinking = DEFAULT_THINKING;
     return out;
   } catch {
     return d;
@@ -185,10 +245,13 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
   let historyHtml = '<span class="k">读取中…</span>';
   // 模式 B 的界面状态（不进 localStorage；API key 输入框的值从不进这里）
   const byok = {
-    loading: false, note: '', providers: null, canRemember: false, keys: [], usage: null, adding: false,
+    loading: false, note: '', providers: null, canRemember: false, keys: [], usage: null, adding: false, memory: null,
     form: { provider: 'hunyuan', model: '', baseUrl: '', reasoning: false, remember: false },
     testHtml: '',
   };
+  // 思路试跑 / A/B（批次 6 P3）
+  const trialState = { games: 5, size: 'XS', ab: false, bText: '', bThinking: '', busy: false, stop: null, html: '' };
+  const strategyLib = createStrategyLibrary();
 
   async function loadHistory() {
     if (!history) return;
@@ -276,7 +339,7 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
       <div class="k" data-k="libnote">${libNote}</div>
       <details class="evalbox"${evalHtml ? ' open' : ''}><summary>整局试跑（与命令行 <code>npm run eval</code> 同一个评测）</summary>
         <div class="row"><label>局数</label><select data-f="evalruns">${[10, 20, 50].map((n) => opt(String(n), `${n} 局`, String(s.evalRuns))).join('')}</select>
-          <span class="k">规格 ${esc(MAP_SIZES[s.mapSize].label)} · 视野 ${esc(VISION_PRESETS[s.vision].label)} · 对手按下面「对手」的设置（本地代理按启发式算）· 种子 1–N · 预算只统计不打断</span>
+          <span class="k">规格 ${esc(MAP_SIZES[s.mapSize].label)} · 对手按下面「对手」的设置（本地代理按启发式算）· 种子 1–N · 预算只统计不打断</span>
           <span class="sp"></span><button class="btn brass" data-a="evalrun"${evalBusy ? ' disabled' : ''}>${evalBusy ? '试跑中…' : '开始试跑'}</button></div>
         <div class="evalout" data-k="eval">${evalHtml}</div>
       </details>
@@ -290,7 +353,7 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
 function decide(obs, api) 每回合一次 → 'N'|'E'|'S'|'W'|'STAY' 或 { move, intent:{type:'gem'|'chest'|'exit'|'cell', x, y, note} }
 ctx   seat size mapSize grid(Uint8Array 1=地板) spawns[4] exits[4]（四个出口都公开） rules{maxTurns,stamina,visionRadius,gemScore,setBonus,chest…}
 obs.self   {seat,x,y,stamina,staminaMax,score,gems[5],sets,exit{x,y},distToExit,lowStamina,inEndgame,blockedStreak}
-obs.actors [{seat,score,stamina,gems,sets,status,visible, x,y,lastDir | lastSeen{x,y,turnsSince}}]   视野切比雪夫 ${makeConfig().vision.entityRadius}
+obs.actors [{seat,score,stamina,gems,sets,status,visible:true, x,y,lastDir}]   全公开：所有在场对手的实时位置（意图不公开）
 obs.gems   [{c,color,x,y,dist}]     obs.chest {present,x,y,dist | respawnAtTurn}     obs.turn / maxTurns / gemGeneration / gemRespawnsLeft
 obs.events 上一回合公开事件：pickup{seat,color,x,y} chest{seat,x,y,kind,value} escaped failed{reason} gemRespawn chestRespawn；自己的 bump / blocked
 api.field(x,y[,{avoid}]) 距离场   api.dist(x,y[,fromX,fromY])   api.shortestStep(x,y[,{avoid}])   api.isFloor(x,y)   （不限次数）
@@ -326,7 +389,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   }
 
   function briefText() {
-    const cfg = makeConfig(matchOverrides('script', s.mapSize, s.vision));
+    const cfg = makeConfig(matchOverrides('script', s.mapSize));
     const opponents = s.opponents.map((o) => {
       if (o.brain === 'script') {
         const l = scriptLabel(o.scriptId);
@@ -335,7 +398,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       return { brain: o.brain === 'proxy' ? 'heuristic' : o.brain, persona: o.persona, label: o.brain === 'mock' ? `模拟大模型（${PERSONAS[o.persona].label}）` : o.brain === 'proxy' ? '大模型（本地代理，评测时按启发式）' : '启发式' };
     });
     const rules = { stamina: cfg.rules.staminaByMode.script, maxTurns: cfg.rules.maxTurns, visionRadius: cfg.vision.entityRadius, gemScore: cfg.treasure.gemScore, setBonus: cfg.treasure.setBonus, gemRespawnMax: cfg.treasure.gemRespawnMax };
-    return buildBrief({ mapSize: s.mapSize, size: cfg.maze.size, rules, opponents, requirement: s.player.brief, name: 'my-bot', vision: s.vision, visionRule: visionText(cfg) });
+    return buildBrief({ mapSize: s.mapSize, size: cfg.maze.size, rules, opponents, requirement: s.player.brief, name: 'my-bot', visionRule: visionText(cfg) });
   }
 
   async function copyText(text) {
@@ -376,6 +439,9 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       s.player.keyId = k ? k.keyId : '';
       s.player.keyMeta = k ? { provider: k.provider, providerLabel: k.providerLabel, model: k.model, reasoning: Boolean(k.reasoning) } : null;
     });
+    byok.memory = null; // 经验按模型分开存：换模型就要重新读
+    paintK('mem', memoryHtml());
+    paintK('thinknote', thinkNote());
   }
 
   async function loadByok() {
@@ -417,7 +483,8 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   function testView(r) {
     if (r.status === 200 && r.json.ok) {
       const p = r.json.plan;
-      return `<b class="ok">✓ 连接正常</b> · ${(r.json.ms / 1000).toFixed(1)} 秒 · 模型 <code>${esc(r.json.model || '')}</code> · token ${r.json.usage.in} / ${r.json.usage.out}<br>
+      const th = r.json.thinking ? ` · 思考 ${THINK_ZH[r.json.thinking]}${r.json.fallback ? `（${esc(r.json.fallback)}）` : r.json.thinkingRequested && r.json.thinkingRequested !== r.json.thinking ? `（不支持「${THINK_ZH[r.json.thinkingRequested]}」，按「${THINK_ZH[r.json.thinking]}」）` : ''}${r.json.usage.reasoning ? `，思考 ${r.json.usage.reasoning} token` : ''}` : '';
+      return `<b class="ok">✓ 连接正常</b> · ${(r.json.ms / 1000).toFixed(1)} 秒 · 模型 <code>${esc(r.json.model || '')}</code> · token ${r.json.usage.in} / ${r.json.usage.out}${th}<br>
         示范决策（开局局面）：去${TARGET_ZH[p.targetType]} (${p.target.x}, ${p.target.y}) · ${FOLLOW_ZH[p.follow] || '—'} · 「${esc(p.reason)}」${p.deviation ? `<br>说明：${esc(p.deviation)}` : ''}`;
     }
     if (r.status === 200) {
@@ -427,7 +494,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     const code = r.json && r.json.error;
     const hint = code === 'upstream_auth' ? '（请检查 key 是否正确、账户是否欠费）'
       : code === 'upstream_bad' ? '（请检查模型名）'
-        : code === 'upstream_timeout' ? '（服务商响应太慢；如果是推理模型，请勾选「这是推理模型」后重新添加）'
+        : code === 'upstream_timeout' ? '（服务商响应太慢：可以把思考档位调低再试）'
           : code === 'key_not_found' ? '（「仅本次会话」的 key 已过期，或服务器重启过：请重新添加）' : '';
     return `<b class="bad">✗ 连接失败</b> · ${esc(callErr(r))}${hint}`;
   }
@@ -456,7 +523,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     ? `<input data-f="kbase" value="${esc(f.baseUrl)}" placeholder="https://api.example.com/v1" size="34">`
     : `<span class="k">${esc(pv.baseUrl)}</span>`}</div>
         <div class="row"><label>模型名</label><input data-f="kmodel" value="${esc(f.model)}" placeholder="${esc(pv.model || '必填')}" size="24">
-          <label class="radio"><input type="checkbox" data-f="kreasoning"${f.reasoning ? ' checked' : ''}> 这是推理模型（先思考再回答，超时从 40 秒放宽到 85 秒）</label></div>
+          ${f.provider === 'custom' ? `<label class="radio"><input type="checkbox" data-f="kreasoning"${f.reasoning ? ' checked' : ''}> 这是推理模型（自定义模型的思考没法由游戏控制：勾上则按「高」档放宽预算与超时）</label>` : ''}</div>
         <div class="row"><label>API key</label><input type="password" data-f="kkey" autocomplete="off" spellcheck="false" size="34" placeholder="腾讯云 TokenHub 的 sk-…">
           <label class="radio"><input type="checkbox" data-f="kremember"${f.remember && byok.canRemember ? ' checked' : ''}${byok.canRemember ? '' : ' disabled'}> 记住（服务器加密保存）</label>
           <button class="btn" data-a="kadd">保存并测试</button></div>
@@ -485,7 +552,132 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       <div class="row"><label class="radio"><input type="checkbox" data-f="risk"${p.safetyGate ? '' : ' checked'}> 允许冒险（关闭自保闸门）</label>
         <span class="k">默认关：目标会让你回不了出口时，引擎自动改为回家，记为「引擎安全覆盖」，不算 AI 偏离。</span></div>
       <div class="row"><label>每局调用上限</label><input type="number" data-f="callcap" min="0" max="400" step="10" value="${p.callCap || ''}" placeholder="不限" style="width:80px">
-        <span class="k">到上限后由启发式接着打。实测 HY4 一局约 20 次调用、2–3 万 token（每次输入约 1.2k、输出约 45）；游戏本身的规划预算每座位每局约 70 次。</span></div>`;
+        <span class="k">到上限后由启发式接着打。一局一般 20–60 次决策；每次输入约 2–4k token（含本局会话与经验），输出几十到几百 token，开思考另算思考 token。</span></div>
+      <h4>思考档位</h4>
+      <div class="modes sizes think3">${THINKING.map((lv) => `<button class="choice${p.thinking === lv ? ' on' : ''}" data-thinking="${lv}"><b>${THINK_ZH[lv]}</b><span>${THINK_DESC[lv]}</span></button>`).join('')}</div>
+      <p class="k" data-k="thinknote">${thinkNote()}</p>
+      <h4>本局会话与跨局经验</h4>
+      <p class="k">每次决策，游戏都会把「本局到目前为止的决策和结局」与它上次留给自己的备忘一起带给模型，它能延续自己的计划、记住谁抢过它。下面是跨局的部分：</p>
+      <div class="row"><label class="radio"><input type="checkbox" data-f="usemem"${p.useMemory !== false ? ' checked' : ''}> 开局带上它以往总结的经验</label>
+        <label class="radio"><input type="checkbox" data-f="automem"${p.autoMemory !== false ? ' checked' : ''}${p.useMemory !== false ? '' : ' disabled'}> 每局结束后让它自己复盘、更新经验（多 1–2 次调用）</label></div>
+      <details class="evalbox" data-k="membox"><summary>查看 / 编辑经验（按模型分开存，仅你本人可见）</summary><div data-k="mem">${memoryHtml()}</div></details>
+      <details class="evalbox" data-k="prevbox"><summary>预览提示词（开局局面下它实际收到的内容）</summary><div data-k="preview"><button class="btn mini" data-a="preview">生成预览</button></div></details>
+      <details class="evalbox"${trialState.html ? ' open' : ''}><summary>思路试跑 / A/B 对比（用你的模型在固定种子上跑，陪练是 3 个「预判对手」脚本）</summary>
+        <div class="row"><label>局数</label><select data-f="trialn">${[3, 5, 10, 20].map((n) => opt(String(n), `${n} 局`, String(trialState.games))).join('')}</select>
+          <label>规格</label><select data-f="trialsize">${MAP_SIZE_IDS.map((id) => opt(id, MAP_SIZES[id].label, trialState.size)).join('')}</select>
+          <label class="radio"><input type="checkbox" data-f="trialab"${trialState.ab ? ' checked' : ''}> A/B 对比</label></div>
+        <div data-k="trialb"${trialState.ab ? '' : ' hidden'}>
+          <div class="row"><label>B 的思路</label><select data-f="trialbsel"><option value="">— 从思路库选 —</option>${strategyLib.list().map((e) => opt(e.id, e.name, '')).join('')}</select>
+            <label>B 的思考</label><select data-f="trialbthink">${THINKING.map((lv) => opt(lv, THINK_ZH[lv], trialState.bThinking || p.thinking)).join('')}</select></div>
+          <textarea class="persona" data-f="trialbtext" rows="3" maxlength="2000" placeholder="B 变体的思路（留空 = 和 A 一样，只比较思考档位）">${esc(trialState.bText)}</textarea>
+        </div>
+        <p class="k" data-k="trialest">${trialEstimate()}</p>
+        <div class="row"><span class="sp"></span><button class="btn brass" data-a="trialrun"${trialState.busy ? ' disabled' : ''}>${trialState.busy ? '试跑中…' : '确认费用并开始'}</button>
+          ${trialState.busy ? '<button class="btn" data-a="trialstop">停止</button>' : ''}</div>
+        <div class="evalout" data-k="trial2">${trialState.html}</div>
+      </details>
+      <details class="evalbox"><summary>思路库（${strategyLib.list().length}）</summary><div data-k="stratlib">${strategyLibHtml()}</div></details>
+      <details class="evalbox"><summary>交给我的 agent 调思路：任务书</summary>
+        <p class="k">把任务书粘贴给 WorkBuddy / Codex / Claude Code 等能跑命令的 agent。它会改思路、用 <code>npm run eval:llm</code> 在固定种子上跑你的模型、读复盘、做 A/B，交回一版更好的思路。key 只放它那边的环境变量。</p>
+        <textarea class="persona" data-f="sbrief" rows="3" maxlength="2000" placeholder="写给 agent 的要求，例如：XS 和 S 上冠军率都要提高；不要让 AI 太保守。">${esc(p.strategyBrief || '')}</textarea>
+        <div class="row"><span class="sp"></span><span class="k" data-k="sbriefnote"></span><button class="btn" data-a="copysbrief">复制任务书</button></div>
+      </details>`;
+  }
+
+  // ───────── 思路库 + 思路试跑（批次 6 P3）─────────
+
+  function trialEstimate() {
+    const e = estimateTrial({ size: trialState.size, games: trialState.games, thinking: trialState.ab && trialState.bThinking === 'high' ? 'high' : s.player.thinking, variants: trialState.ab ? 2 : 1 });
+    return `估算：约 ${e.calls} 次调用 · 输入约 ${Math.round(e.tokensIn / 1000)}k / 输出约 ${Math.round(e.tokensOut / 1000)}k token · 约 ${e.minutes} 分钟 · 费用记在你的服务商账户。A = 上面的思路 + 当前思考档位${s.player.useMemory !== false && byok.memory && byok.memory.text ? ' + 经验' : ''}。`;
+  }
+
+  function strategyLibHtml() {
+    const list = strategyLib.list();
+    const rows = list.map((e) => `<tr><td>${esc(e.name)}</td><td class="k">${esc(e.text.slice(0, 40))}${e.text.length > 40 ? '…' : ''}</td>
+      <td class="k">${e.lastTrial ? `${esc(e.lastTrial.size)} ${e.lastTrial.games} 局：均分 ${e.lastTrial.avgScore.toFixed(2)} · 到达 ${(e.lastTrial.escapeRate * 100).toFixed(0)}% · 白跑 ${e.lastTrial.avgWasted.toFixed(1)}` : '还没试跑'}</td>
+      <td><button class="btn mini" data-a="stratuse" data-id="${esc(e.id)}">用这版</button><button class="btn mini" data-a="stratdel" data-id="${esc(e.id)}">删除</button></td></tr>`).join('');
+    return `${list.length ? `<table class="hist"><tr><th>名称</th><th>开头</th><th>最近一次试跑</th><th></th></tr>${rows}</table>` : '<p class="k">还没有保存的思路。</p>'}
+      <div class="row"><input data-f="stratname" placeholder="给当前思路起个名字" size="18" maxlength="30"><button class="btn mini" data-a="stratsave">把上面的思路存进思路库</button><span class="k" data-k="stratnote"></span></div>`;
+  }
+
+  async function runTrial() {
+    const p = s.player;
+    if (!llm || !llm.trial || !p.keyId || !p.keyMeta) {
+      paintK('trial2', '<b class="bad">先在上面选一个模型</b>');
+      return;
+    }
+    const e = estimateTrial({ size: trialState.size, games: trialState.games, thinking: p.thinking, variants: trialState.ab ? 2 : 1 });
+    if (!confirm(`将用你的 ${p.keyMeta.model} 跑 ${trialState.games} 局${trialState.ab ? ' × 2 个变体' : ''}，约 ${e.calls} 次调用、${Math.round((e.tokensIn + e.tokensOut) / 1000)}k token，费用记在你的服务商账户。继续？`)) return;
+    trialState.busy = true;
+    trialState.stop = { aborted: false };
+    render();
+    const memory = p.useMemory !== false && byok.memory && byok.memory.text ? byok.memory.text : '';
+    const base = { strategy: p.persona, autonomy: p.autonomy, safetyGate: p.safetyGate !== false, memory };
+    const seeds = `1-${trialState.games}`;
+    const prog = (tag) => (d, t, g) => paintK('trial2', `<span class="k">${tag} 试跑中 ${d} / ${t} 局 · 刚完成种子 ${g.seed}：${g.status === 'escaped' ? `到达 ${g.rawScore} 分` : '出局'}，第 ${g.place} 名</span>`);
+    try {
+      const a = await llm.trial({ size: trialState.size, seeds, signal: trialState.stop, onProgress: prog('A'), variant: { ...base, name: `A · ${THINK_ZH[p.thinking]}思考`, thinking: p.thinking } });
+      let b = null;
+      if (trialState.ab) {
+        const bText = trialState.bText.trim() || p.persona;
+        b = await llm.trial({ size: trialState.size, seeds, signal: trialState.stop, onProgress: prog('B'), variant: { ...base, strategy: bText, name: `B · ${THINK_ZH[trialState.bThinking || p.thinking]}思考${trialState.bText.trim() ? ' · 另一版思路' : ''}`, thinking: trialState.bThinking || p.thinking } });
+      }
+      trialState.html = mdToHtml(trialMarkdown(a, b));
+      strategyLib.noteTrial(p.persona, { size: trialState.size, ...a.summary });
+      if (b && trialState.bText.trim()) strategyLib.noteTrial(trialState.bText.trim(), { size: trialState.size, ...b.summary });
+    } catch (err) {
+      trialState.html = `<b class="bad">试跑中止</b> · ${esc(err.message)}`;
+    }
+    trialState.busy = false;
+    render();
+  }
+
+  // ───────── 思考档位 / 跨局经验 / 提示词预览（批次 6 harness）─────────
+
+  const providerOf = () => (byok.providers || []).find((x) => s.player.keyMeta && x.id === s.player.keyMeta.provider) || null;
+  function thinkNote() {
+    const pv = providerOf();
+    const lv = s.player.thinking;
+    if (!pv) return '游戏会等模型想完再走（结果与快慢无关），开思考只让对局变慢、费用变高。';
+    const ok = (pv.thinking || ['off']).includes(lv);
+    return `${esc(pv.label)}：${esc(pv.note || '')}${ok ? '' : ` · <b class="warn">这个模型不支持「${THINK_ZH[lv]}」，对局里会按「关」调用</b>`}`;
+  }
+
+  function memoryHtml() {
+    const m = byok.memory;
+    if (!s.player.keyMeta) return '<p class="k">先在上面选一个模型。</p>';
+    if (!m) return '<button class="btn mini" data-a="memload">读取经验</button>';
+    if (m.error) return `<p class="bad">${esc(m.error)}</p><button class="btn mini" data-a="memload">重试</button>`;
+    return `<p class="k">模型 <code>${esc(m.scope)}</code> · ${m.text ? `累计 ${m.games} 局 · ${Array.from(m.text).length} / ${MEMORY_MAX} 字` : '还没有经验：打完一局会自动写'}</p>
+      <textarea class="persona" data-f="memtext" rows="8" maxlength="${MEMORY_MAX}">${esc(m.text)}</textarea>
+      <div class="row"><span class="sp"></span><span class="k" data-k="memnote"></span>
+        <button class="btn mini" data-a="memsave">保存修改</button><button class="btn mini" data-a="memclear">清空</button></div>`;
+  }
+
+  async function loadMem() {
+    if (!llm || !s.player.keyMeta) return;
+    const scope = memoryScope(s.player.keyMeta);
+    const r = await llm.call('GET', `/api/v1/memory?scope=${encodeURIComponent(scope)}`);
+    byok.memory = r.status === 200
+      ? { scope, text: r.json.item ? r.json.item.text : '', games: r.json.item ? r.json.item.games : 0 }
+      : { scope, error: `读取失败：${callErr(r)}` };
+    paintK('mem', memoryHtml());
+  }
+
+  function promptPreview() {
+    const p = s.player;
+    const cfg = makeConfig(matchOverrides('byok', s.mapSize));
+    const m = createMatch(1, cfg);
+    const obs = observe(m.map, m.state, 0, cfg, { patch: true, events: [] });
+    const memText = p.useMemory !== false && byok.memory && byok.memory.text ? byok.memory.text : '';
+    const msgs = buildMessages(buildPayload(m.map, obs, cfg), p.persona, cfg, {
+      autonomy: p.autonomy, safetyGate: p.safetyGate !== false, memory: memText,
+      context: { why: 'start', plan: null, budget: cfg.ai.normalSoftCapPerAgent },
+    });
+    const chars = msgs.reduce((a, x) => a + x.content.length, 0);
+    return `<p class="k">种子 1 · 规格 ${esc(s.mapSize)} 的开局；约 ${chars} 字符。对局中每次决策的 user 消息前面还会加上「本局到目前为止」的会话。${memText ? '已含经验。' : (p.useMemory !== false ? '经验还没读取或为空（点上面的「读取经验」）。' : '')}</p>
+      ${msgs.map((x) => `<h4>${x.role}</h4><pre class="prompt">${esc(x.content)}</pre>`).join('')}
+      <button class="btn mini" data-a="preview">重新生成</button>`;
   }
 
   async function addKey() {
@@ -521,7 +713,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   async function testKey(id) {
     byok.testHtml = '测试中…（用开局局面跑一次示范决策）';
     paintTest();
-    const r = await llm.call('POST', `/api/v1/keys/${encodeURIComponent(id)}/test`, { autonomy: s.player.autonomy, strategy: s.player.persona });
+    const r = await llm.call('POST', `/api/v1/keys/${encodeURIComponent(id)}/test`, { autonomy: s.player.autonomy, strategy: s.player.persona, thinking: s.player.thinking });
     byok.testHtml = testView(r);
     const us = await llm.call('GET', '/api/v1/usage');
     if (us.status === 200) byok.usage = us.json;
@@ -557,12 +749,6 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
         <div class="modes sizes">${MAP_SIZE_IDS.map((id) => {
           const z = MAP_SIZES[id];
           return `<button class="choice${s.mapSize === id ? ' on' : ''}" data-size="${id}"><b>${z.label}</b><span>体力 ${z.stamina} · 上限 ${z.maxTurns} 回合</span></button>`;
-        }).join('')}</div>
-      </section>
-      <section><h3>视野规则 <small class="k">实验中，默认「视野半径（现行）」</small></h3>
-        <div class="modes sizes vis">${VISION_IDS.map((id) => {
-          const v = VISION_PRESETS[id];
-          return `<button class="choice${s.vision === id ? ' on' : ''}" data-vision="${id}"><b>${esc(v.label)}</b><span>${esc(v.short)}</span></button>`;
         }).join('')}</div>
       </section>
       <section><h3>对手</h3>
@@ -608,11 +794,6 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   root.addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    if (b.dataset.vision && isVision(b.dataset.vision)) {
-      set(() => { s.vision = b.dataset.vision; });
-      root.querySelectorAll('[data-vision]').forEach((x) => x.classList.toggle('on', x === b));
-      return;
-    }
     if (b.dataset.size && isMapSize(b.dataset.size)) {
       set(() => { s.mapSize = b.dataset.size; });
       root.querySelectorAll('[data-size]').forEach((x) => x.classList.toggle('on', x === b));
@@ -623,6 +804,56 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       render();
       autoProbe();
       if (s.player.mode === 'byok') loadByok();
+    } else if (b.dataset.thinking && isThinking(b.dataset.thinking)) {
+      set(() => { s.player.thinking = b.dataset.thinking; });
+      root.querySelectorAll('[data-thinking]').forEach((x) => x.classList.toggle('on', x === b));
+      paintK('thinknote', thinkNote());
+    } else if (b.dataset.a === 'memload') {
+      paintK('mem', '<span class="k">读取中…</span>');
+      await loadMem();
+    } else if (b.dataset.a === 'memsave' || b.dataset.a === 'memclear') {
+      const m = byok.memory;
+      if (!m || m.error) return;
+      const clear = b.dataset.a === 'memclear';
+      if (clear && !confirm(`清空模型 ${m.scope} 的全部经验？`)) return;
+      const ta = root.querySelector('[data-f="memtext"]');
+      const text = clear ? '' : (ta ? ta.value : m.text);
+      const r = await llm.call('PUT', '/api/v1/memory', { scope: m.scope, text, games: clear ? 0 : m.games });
+      if (r.status === 200) {
+        byok.memory = { scope: m.scope, text: r.json.item ? r.json.item.text : '', games: r.json.item ? r.json.item.games : 0 };
+        paintK('mem', memoryHtml());
+        paintK('memnote', `<b class="ok">${clear ? '已清空' : '已保存'}</b>`);
+      } else paintK('memnote', `<b class="bad">${esc(callErr(r))}</b>`);
+    } else if (b.dataset.a === 'preview') {
+      paintK('preview', promptPreview());
+    } else if (b.dataset.a === 'copysbrief') {
+      const p = s.player;
+      const km = p.keyMeta || { provider: 'kimi', model: 'kimi-k3' };
+      const text = buildStrategyBrief({
+        provider: km.provider, model: km.model, mapSize: s.mapSize, thinking: p.thinking, autonomy: p.autonomy, strategy: p.persona,
+        memory: byok.memory && byok.memory.text ? byok.memory.text : '', requirement: p.strategyBrief,
+      });
+      const ok = await copyText(text);
+      paintK('sbriefnote', ok ? '<b class="ok">已复制</b>，粘贴给你的 agent' : '<b class="bad">复制失败</b>');
+    } else if (b.dataset.a === 'trialrun') {
+      await runTrial();
+    } else if (b.dataset.a === 'trialstop') {
+      if (trialState.stop) trialState.stop.aborted = true;
+      paintK('trial2', '<span class="k">正在停止（等当前这一步回来）…</span>');
+    } else if (b.dataset.a === 'stratsave') {
+      const nm = root.querySelector('[data-f="stratname"]');
+      const r = strategyLib.save(nm ? nm.value : '', s.player.persona);
+      paintK('stratlib', strategyLibHtml());
+      paintK('stratnote', r.error ? `<b class="bad">${esc(r.error)}</b>` : `<b class="ok">已保存</b>「${esc(r.name)}」`);
+    } else if (b.dataset.a === 'stratuse') {
+      const e = strategyLib.get(b.dataset.id);
+      if (e) {
+        set(() => { s.player.persona = e.text; });
+        render();
+      }
+    } else if (b.dataset.a === 'stratdel') {
+      strategyLib.remove(b.dataset.id);
+      paintK('stratlib', strategyLibHtml());
     } else if (b.dataset.autonomy) {
       set(() => { s.player.autonomy = b.dataset.autonomy; });
       root.querySelectorAll('[data-autonomy]').forEach((x) => x.classList.toggle('on', x === b));
@@ -667,7 +898,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       try {
         const seats = await evalSeats();
         const { markdown } = await scripts.evaluate({
-          size: s.mapSize, vision: s.vision, seeds: `1-${s.evalRuns}`, seats,
+          size: s.mapSize, seeds: `1-${s.evalRuns}`, seats,
           onProgress: (d, t) => paintK('eval', `<span class="k">试跑中 ${d} / ${t} 局…</span>`),
         });
         evalHtml = mdToHtml(markdown);
@@ -763,6 +994,8 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     else if (f === 'sname') set(() => { s.player.scriptName = e.target.value; });
     else if (f === 'sauthor') set(() => { s.player.scriptAuthor = e.target.value; });
     else if (f === 'brief') set(() => { s.player.brief = e.target.value; });
+    else if (f === 'trialbtext') trialState.bText = e.target.value;
+    else if (f === 'sbrief') set(() => { s.player.strategyBrief = e.target.value; });
     else if (f === 'persona') {
       set(() => { s.player.persona = e.target.value; });
       const c = root.querySelector('[data-k="count"]');
@@ -790,6 +1023,29 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     } else if (f === 'kreasoning') byok.form.reasoning = t.checked;
     else if (f === 'kremember') byok.form.remember = t.checked;
     else if (f === 'risk') set(() => { s.player.safetyGate = !t.checked; });
+    else if (f === 'usemem') {
+      set(() => { s.player.useMemory = t.checked; });
+      const a = root.querySelector('[data-f="automem"]');
+      if (a) a.disabled = !t.checked;
+    } else if (f === 'automem') set(() => { s.player.autoMemory = t.checked; });
+    else if (f === 'trialn' || f === 'trialsize' || f === 'trialab' || f === 'trialbthink') {
+      if (f === 'trialn') trialState.games = Number(t.value) || 5;
+      if (f === 'trialsize' && isMapSize(t.value)) trialState.size = t.value;
+      if (f === 'trialab') {
+        trialState.ab = t.checked;
+        const box = root.querySelector('[data-k="trialb"]');
+        if (box) box.hidden = !t.checked;
+      }
+      if (f === 'trialbthink') trialState.bThinking = t.value;
+      paintK('trialest', trialEstimate());
+    } else if (f === 'trialbsel' && t.value) {
+      const e = strategyLib.get(t.value);
+      if (e) {
+        trialState.bText = e.text;
+        const ta = root.querySelector('[data-f="trialbtext"]');
+        if (ta) ta.value = e.text;
+      }
+    }
     else if (f === 'mapping') set(() => { s.mapping = t.value; });
     else if (f === 'speed') set(() => { s.speed = Number(t.value); });
     else if (f === 'brain') {
@@ -848,6 +1104,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       canResume = resume;
       error = err;
       probed = false;
+      byok.memory = null; // 赛后可能刚写过经验：回到设置页时重新读
       render();
       root.hidden = false;
       autoProbe();

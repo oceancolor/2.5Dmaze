@@ -19,6 +19,7 @@
     "calibrate": "node tools/calibrate.mjs",
     "bench": "node tools/bench.mjs",
     "eval": "node tools/maze-eval.mjs",
+    "eval:llm": "node tools/maze-llm-eval.mjs",
     "exp:vision": "node tools/vision-experiment.mjs"
   }
 }

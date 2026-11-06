@@ -9,9 +9,9 @@ const OPP_ZH = { heuristic: '启发式', mock: '模拟大模型', proxy: '大模
  * @param {{mapSize:string, size:number, rules:{stamina:number, maxTurns:number, visionRadius:number, gemScore:number, setBonus:number, gemRespawnMax:number},
  *          opponents:{brain:string, label?:string}[], requirement?:string, name?:string}} o
  */
-export function buildBrief({ mapSize, size, rules, opponents = [], requirement = '', name = 'my-bot', vision = 'radius', visionRule = '' }) {
+export function buildBrief({ mapSize, size, rules, opponents = [], requirement = '', name = 'my-bot', visionRule = '' }) {
   const opp = opponents.map((o, k) => `座位 ${k + 1}：${o.label || OPP_ZH[o.brain] || o.brain}`).join('；') || '启发式 × 3';
-  const vArg = vision && vision !== 'radius' ? ` --vision ${vision}` : '';
+  const vArg = '';
   const seat = (o) => (o.brain === 'mock' ? `mock:${o.persona || 'balanced'}` : 'heuristic');
   const seatArgs = opponents.map((o, k) => (o.brain === 'heuristic' ? '' : ` --seat${k + 1} ${seat(o)}`)).join('');
   const req = String(requirement || '').trim() || '（玩家没有额外要求：在不出局的前提下分数尽量高、名次尽量靠前）';
@@ -24,7 +24,7 @@ ${req}
 
 ## 对局设置（本次评测按这个来）
 - 地图规格 ${mapSize}（${size}×${size}），体力 ${rules.stamina}，回合上限 ${rules.maxTurns}
-- 视野规则：${visionRule || `对手只在切比雪夫距离 ${rules.visionRadius} 内实时可见；视野外只给最后目击位置`}（\`ctx.rules.vision\` 里有规则参数）
+- 视野：${visionRule || '所有在场对手的实时位置全公开（意图不公开，要自己推断）'}
 - 对手：${opp}
 - 计分：宝石数 × ${rules.gemScore} + 成套数 × ${rules.setBonus}（五色各一颗为一套）+ 宝箱分；宝石拿空后刷新（最多 ${rules.gemRespawnMax} 次）
 - 只有到达自己的出口才有成绩；体力归零或到回合上限还没到出口就出局、成绩作废
@@ -66,5 +66,51 @@ npm run eval -- --script ${name}.js --size ${mapSize}${vArg} --seeds 1-50 --form
 - 一个文件 \`${name}.js\`，第一行写文件头：\`// @maze-script name: <脚本名> | author: <你的名字> | origin: agent\`
 - 附上最后一次评测的结果摘要，以及打法说明（怎么选目标、怎么回家、怎么对付对手）
 - 我会在游戏设置页「编写 Agent 脚本 → 导入 .js」载入，或放进对手座位和别的玩家对战
+`;
+}
+
+/**
+ * 「调大模型思路」任务书（批次 6 P3）：交给 agent，让它改思路文本 → 用 npm run eval:llm 在固定种子上跑 → 读复盘 → 再改。
+ * 与写脚本的任务书同一套流程，只是它改的是给模型的话。key 只放环境变量，不进任何文件。
+ * @param {{provider:string, model:string, mapSize:string, thinking:string, autonomy:string, strategy:string, memory?:string, requirement?:string}} o
+ */
+export function buildStrategyBrief({ provider, model, mapSize, thinking, autonomy, strategy, memory = '', requirement = '' }) {
+  const req = String(requirement || '').trim() || '（玩家没有额外要求：在不出局的前提下均分尽量高、冠军率尽量高）';
+  const cur = String(strategy || '').trim() || '（还没写）';
+  return `# 任务书：为「迷宫寻宝」调教大模型的思路
+
+我在「接入大模型」模式里用 **${provider}/${model}** 代打（思考档位 ${thinking}，自主度 ${autonomy}）。模型每次只选下一个目标（宝石 / 宝箱 / 出口），寻路由引擎完成；它能看到所有对手的实时位置（目标不公开）、引擎算好的博弈事实表（每颗宝物各对手的步数、能否回家、lead）、本局到目前为止的决策与结局，以及我写的「思路」。
+
+请你帮我改写这段思路（≤ 2000 字），让同一个模型打得更好。
+
+## 我的要求
+${req}
+
+## 现在的思路（strategy.txt）
+\`\`\`
+${cur}
+\`\`\`
+${memory ? `\n## 模型自己总结的跨局经验（memory.txt，只读参考；试跑时可用 --memory 带上）\n\`\`\`\n${memory}\n\`\`\`\n` : ''}
+## 怎么评测
+在游戏项目根目录（需要 Node 22+），key 只放环境变量：
+
+\`\`\`bash
+# PowerShell：$env:MAZE_LLM_KEY='你的 key'
+MAZE_LLM_KEY=… npm run eval:llm -- --provider ${provider} --model ${model} --strategy strategy.txt --thinking ${thinking} --autonomy ${autonomy} --size ${mapSize} --seeds 1-5
+# 不加 --yes 只打印费用估算；确认后加 --yes。A/B 对比：
+MAZE_LLM_KEY=… npm run eval:llm -- … --strategy strategy.txt --b-strategy strategy-v2.txt --seeds 1-10 --yes --records out/
+\`\`\`
+
+输出：到达率、均分（未到达计 0）、冠军率、白跑步数、被抢率，每局「损失最大的一次」；A/B 给出按种子配对的分差均值与标准误（|均值| > 2 × 标准误才算超出噪声）。\`--records\` 写出的每局记录可以在游戏里回放，也可以交给服务器校验。陪练是三个「预判对手」脚本。
+
+## 工作方式
+1. 先用现在的思路跑 5 局摸底，读「损失最大的一次」，找出模型反复犯的错（抢不过还去抢、回家太晚、放着宝箱不开……）。
+2. 思路写成**可执行的判断规则**，最好引用事实表里的字段（例如「lead ≤ -2 的宝石不去」「对手 spare < 10 时他多半要回家，他附近的宝石可以去」「同时有 then 后续目标时写清顺序」）。不要写坐标和种子（每局地图不同）。
+3. 每次只改一两处，用 A/B 对比验证；没有超出噪声就别急着下结论，加局数。
+4. 每局几十次调用，费用记在我的服务商账户：先小规格（XS / S）少局数，确有提升再到大图验证。
+
+## 交付
+- 最终版 strategy.txt（我会粘贴到游戏设置页「你的思路」）
+- 一段说明：改了什么、为什么、A/B 的数据
 `;
 }

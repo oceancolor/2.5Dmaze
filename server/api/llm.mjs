@@ -15,7 +15,7 @@ import { buildMessages, buildPayload, checkContract, parsePlan, validatePlan, AU
 import { PERSONAS } from '../../src/ai/mock-llm.js';
 import { HttpError, readJson, sendJson } from '../http.mjs';
 import { authenticate } from './accounts.mjs';
-import { PROVIDERS, checkBaseUrl, extraBody, outputBudget, OUTPUT_CAP, providerList } from '../providers.mjs';
+import { PROVIDERS, checkBaseUrl, providerList, thinkingPlan, THINKING, DEFAULT_THINKING, THINK_BUDGET } from '../providers.mjs';
 import { chatCompletion } from '../llm-relay.mjs';
 
 const KEY_ID = /^k_[A-Za-z0-9_-]{16}$/;
@@ -23,10 +23,13 @@ const MODEL = /^[\w.:/@-]{1,80}$/;
 const API_KEY = /^[\x21-\x7e]{8,400}$/;
 const MATCH_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const ROLES = new Set(['system', 'user', 'assistant']);
-const MAX_CHARS = 32000;
-/** 上游超时：普通模型 45 s、推理模型 90 s；比客户端（40 s / 85 s）略长，由客户端判超时与重试。
- *  HY4 关闭思考实测经中转 P50 ≈ 2.9 s，最慢 24.9 s。客户端放弃后这里仍等上游回来并记账（服务商照样计费）。 */
-export const RELAY_TIMEOUT_MS = { normal: 45000, reasoning: 90000 };
+/** 契约 v2 起每次请求带本局会话（≤ 8 条原样 + 摘要）与跨局经验（≤ 2000 字），上限放宽。 */
+const MAX_CHARS = 48000;
+/** 调用类型：plan / repair（对局中）、memory（赛后让模型自己写经验 / 压缩经验，批次 6）。 */
+const KINDS = new Set(['plan', 'repair', 'memory']);
+/** 上游超时按实际思考档位（providers.RELAY_TIMEOUT_MS：45 / 75 / 150 s），比客户端（40 / 70 / 145 s）略长，由客户端判超时与重试。
+ *  客户端放弃后这里仍等上游回来并记账（服务商照样计费）。 */
+export { RELAY_TIMEOUT_MS } from '../providers.mjs';
 /** 每局经中转的调用上限（4 座位 × 360 次池上限 + 修复，留余量）；防止中转被当成通用代理。 */
 const MATCH_CALL_CAP = 1600;
 
@@ -51,7 +54,7 @@ function upstreamFail(res, r) {
   sendJson(res, e.status, { error: e.code, message: r.message, upstreamStatus: r.status, ms: r.ms });
 }
 
-function record(ctx, user, k, { matchId = null, seat = null, kind, r, messages, maxTokens }) {
+function record(ctx, user, k, { matchId = null, seat = null, kind, r, messages, tp }) {
   ctx.store.insertUsage({
     userId: user.id, matchId, seat, kind, provider: k.provider, model: k.model,
     tokensIn: r.ok ? r.usage.in : 0, tokensOut: r.ok ? r.usage.out : 0, ms: r.ms, ok: r.ok, at: ctx.now(),
@@ -61,30 +64,45 @@ function record(ctx, user, k, { matchId = null, seat = null, kind, r, messages, 
   if (ctx.llmLog && ctx.llmLog.enabled) {
     ctx.llmLog.write({
       userId: user.id, matchId, seat, kind,
-      provider: k.provider, model: k.model, reasoning: Boolean(k.reasoning), keyId: k.id, keyHint: k.hint,
-      request: { maxTokens, extra: extraBody(k.provider, k.reasoning), messages },
+      provider: k.provider, model: k.model, reasoning: Boolean(k.reasoning), thinking: tp.level, keyId: k.id, keyHint: k.hint,
+      request: { maxTokens: tp.maxTokens, extra: tp.extra, messages },
       ok: r.ok, ms: r.ms,
       ...(r.ok
-        ? { reply: r.text, finish: r.finish, usage: r.usage, upstreamModel: r.model }
+        ? { reply: r.text, finish: r.finish, usage: r.usage, upstreamModel: r.model, ...(r.reasoning ? { reasoningText: r.reasoning } : {}) }
         : { error: { kind: r.kind, status: r.status, message: r.message } }),
     });
   }
 }
 
-const budgetOf = (k, maxTokens) => outputBudget(k.provider, maxTokens, k.reasoning);
+/** 这把 key 在请求的思考档位下怎么调（模型不支持时降档）。 */
+const planOf = (k, thinking, maxTokens) => thinkingPlan(k.provider, THINKING.includes(thinking) ? thinking : DEFAULT_THINKING, { requested: maxTokens, reasoning: k.reasoning });
 
-const call = (ctx, k, { messages, maxTokens, temperature }) => chatCompletion({
+const once = (ctx, k, { messages, tp, temperature }) => chatCompletion({
   base: k.baseUrl,
   model: k.model,
   apiKey: k.apiKey,
   messages,
-  maxTokens: budgetOf(k, maxTokens),
+  maxTokens: tp.maxTokens,
   temperature,
-  extra: extraBody(k.provider, k.reasoning),
-  timeoutMs: k.reasoning ? RELAY_TIMEOUT_MS.reasoning : RELAY_TIMEOUT_MS.normal,
+  extra: tp.extra,
+  timeoutMs: tp.timeoutMs,
   upstream: ctx.upstream,
   now: ctx.now,
 });
+
+/**
+ * 一次调用；思考把预算用光、答案为空（finish = length 且 content 空，DeepSeek 低档实测偶发）时，
+ * 用「关」档补问一次，保证拿到答案。返回 {r, tp}：tp 是实际生效的档位（补问时 level = 'off'、fallback = true）。
+ * 两次调用都记账、都写日志（由调用方 record）。
+ */
+async function call(ctx, k, { messages, tp, temperature, onFirst }) {
+  const r = await once(ctx, k, { messages, tp, temperature });
+  if (!(r.ok && tp.level !== 'off' && r.finish === 'length' && !String(r.text || '').trim())) return { r, tp };
+  if (onFirst) onFirst(r, tp);
+  const off = { ...planOf(k, 'off', tp.maxTokens - (THINK_BUDGET[tp.level] || 0)), fallback: true };
+  const r2 = await once(ctx, k, { messages, tp: off, temperature });
+  return { r: r2.ok ? { ...r2, usage: { in: r.usage.in + r2.usage.in, out: r.usage.out + r2.usage.out, reasoning: (r.usage.reasoning || 0) + (r2.usage.reasoning || 0) } } : r2, tp: off, first: r };
+}
 
 export function getProviders(req, res, ctx) {
   sendJson(res, 200, { items: providerList(), canRemember: ctx.vault.canRemember });
@@ -139,13 +157,13 @@ export async function testKey(req, res, ctx, id) {
   const strategy = typeof b.strategy === 'string' && b.strategy.trim() ? b.strategy : PERSONAS.balanced.text;
   const cfg = makeConfig({ match: { playerMode: 'byok' } });
   const m = createMatch(1, cfg);
-  const obs = observe(m.map, m.state, 0, cfg, { patch: true });
+  const obs = observe(m.map, m.state, 0, cfg, { patch: true, events: [] });
   const payload = buildPayload(m.map, obs, cfg);
   const messages = buildMessages(payload, strategy, cfg, { autonomy, safetyGate: true, context: { why: 'start', plan: null, budget: cfg.ai.normalSoftCapPerAgent } });
-  // 推理模型的输出预算要跟着放宽：配置里的 maxOutputTokens(200) 会把思考 token 一起吃掉，content 还没写出来就被截断。
-  const maxTokens = k.reasoning ? OUTPUT_CAP.reasoning : cfg.ai.llm.maxOutputTokens;
-  const r = await call(ctx, k, { messages, maxTokens, temperature: 0 });
-  record(ctx, user, k, { kind: 'test', r, messages, maxTokens: budgetOf(k, maxTokens) });
+  // 思考档位与对局一致（默认低）：思考 token 另给预算，否则会把答案挤掉
+  const tp0 = planOf(k, b.thinking, cfg.ai.llm.contractMaxTokens);
+  const { r, tp } = await call(ctx, k, { messages, tp: tp0, temperature: 0, onFirst: (r1, t1) => record(ctx, user, k, { kind: 'test', r: r1, messages, tp: t1 }) });
+  record(ctx, user, k, { kind: 'test', r, messages, tp });
   if (!r.ok) {
     upstreamFail(res, r);
     return;
@@ -155,6 +173,9 @@ export async function testKey(req, res, ctx, id) {
   const valid = parsed.ok ? validatePlan(parsed.plan, obs) : null;
   sendJson(res, 200, {
     ok: Boolean(parsed.ok && contract.ok && valid.ok),
+    thinking: tp.level,
+    thinkingRequested: tp0.requested,
+    ...(tp.fallback ? { fallback: '思考用光了预算、没写出答案，已自动用「关」档补问一次' } : {}),
     ms: r.ms,
     model: r.model,
     finish: r.finish,
@@ -174,7 +195,7 @@ export async function relayChat(req, res, ctx) {
   if (typeof b.matchId !== 'string' || !MATCH_ID.test(b.matchId)) throw new HttpError(400, 'bad_match_id', 'matchId 必填（本局的对局 ID）');
   const seat = Number.isInteger(b.seat) && b.seat >= 0 && b.seat < 4 ? b.seat : null;
   if (seat === null) throw new HttpError(400, 'bad_seat', 'seat 应为 0–3');
-  const kind = b.kind === 'repair' ? 'repair' : 'plan';
+  const kind = KINDS.has(b.kind) ? b.kind : 'plan';
   const msgs = b.messages;
   if (!Array.isArray(msgs) || !msgs.length || msgs.length > 4) throw new HttpError(400, 'bad_messages', 'messages 应为 1–4 条');
   let chars = 0;
@@ -190,13 +211,21 @@ export async function relayChat(req, res, ctx) {
 
   const maxTokens = Number.isInteger(b.max_tokens) && b.max_tokens > 0 ? b.max_tokens : 200;
   const temperature = Number.isFinite(b.temperature) ? Math.min(1, Math.max(0, b.temperature)) : 0;
-  const r = await call(ctx, k, { messages: msgs, maxTokens, temperature });
-  record(ctx, user, k, { matchId: b.matchId, seat, kind, r, messages: msgs, maxTokens: budgetOf(k, maxTokens) });
+  const tp0 = planOf(k, b.thinking, maxTokens);
+  const { r, tp, first } = await call(ctx, k, {
+    messages: msgs, tp: tp0, temperature,
+    onFirst: (r1, t1) => record(ctx, user, k, { matchId: b.matchId, seat, kind, r: r1, messages: msgs, tp: t1 }),
+  });
+  record(ctx, user, k, { matchId: b.matchId, seat, kind, r, messages: msgs, tp });
   if (!r.ok) {
     upstreamFail(res, r);
     return;
   }
-  sendJson(res, 200, { text: r.text, usage: r.usage, model: r.model, finish: r.finish, ms: r.ms });
+  const reasoning = (first && first.reasoning) || r.reasoning;
+  sendJson(res, 200, {
+    text: r.text, usage: r.usage, model: r.model, finish: r.finish, ms: r.ms + (first ? first.ms : 0), thinking: tp.level,
+    ...(tp.fallback ? { fallback: true } : {}), ...(reasoning ? { reasoning } : {}),
+  });
 }
 
 export function getUsage(req, res, ctx) {

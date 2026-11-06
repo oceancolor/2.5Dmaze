@@ -4,7 +4,6 @@
 
 import { makeConfig } from '../config/default.config.js';
 import { matchOverrides, isMapSize } from '../config/map-sizes.js';
-import { isVision } from '../config/vision-modes.js';
 import { normalizeSeed, freshSeed } from '../core/rng.js';
 import { createMatch } from '../core/state.js';
 import { observe } from '../core/observe.js';
@@ -16,11 +15,13 @@ import { AUTONOMY } from '../ai/codec.js';
 import { replay } from '../record/replayer.js';
 import { rankActors } from '../core/scoring.js';
 import { createScheduler } from './scheduler.js';
-import { createMockTransport, createProxyTransport, createRelayTransport, probeProxy } from './transport.js';
+import { createMockTransport, createProxyTransport, createRelayTransport, probeProxy, DEFAULT_THINKING, isThinking } from './transport.js';
 import { now, wallNow, frameLoop } from './clock.js';
 import { saveRecord } from './storage.js';
 import { createSync, newMatchId, syncText } from './sync.js';
 import { buildTalkExport, talkEntry, TALK_MAX_CALLS } from './talk-export.js';
+import { loadMemory, matchTimeline, memoryScope, writeMemory } from './coach.js';
+import { runLlmTrial } from '../player/eval/llm-eval.js';
 import { createInput, MAPPINGS } from '../player/input.js';
 import { createScriptController, testScript } from '../player/script-host.js';
 import { BUILTINS, ORIGINS, builtinUrl, codeHashOf, createLibrary } from '../player/library.js';
@@ -160,7 +161,7 @@ async function startMatch(setup, { sameSeed = false } = {}) {
     }
     p.keyMeta = { provider: keyMeta.provider, providerLabel: keyMeta.providerLabel, model: keyMeta.model, reasoning: Boolean(keyMeta.reasoning) };
   }
-  const cfg = makeConfig(matchOverrides(p.mode, setup.mapSize, setup.vision));
+  const cfg = makeConfig(matchOverrides(p.mode, setup.mapSize));
   const seed = sameSeed && lastSeed !== null ? lastSeed : setup.seed ? parseSeed(setup.seed) : freshSeed();
   boot.hidden = false;
   boot.textContent = '生成迷宫…';
@@ -187,6 +188,7 @@ async function startMatch(setup, { sameSeed = false } = {}) {
   const pool = p.mode === 'byok' ? pools.byok : usesProxy ? pools.proxy : pools.mock;
   const usage = { calls: 0, failed: 0, in: 0, out: 0 };
   const talk = []; // 模式 B：玩家 AI 每次中转的请求 / 回复（结算卡「导出 AI 对话」）
+  let memory = null; // 模式 B：开局读到的跨局经验 {text, games}
   let hudRef = null;
 
   const ctrls = [];
@@ -201,8 +203,13 @@ async function startMatch(setup, { sameSeed = false } = {}) {
         onEvent: (e) => hudRef && hudRef.agentEvent(e),
       }));
     } else if (p.mode === 'byok') {
+      // 跨局经验（批次 6 harness）：按「服务商/模型」取，植入 system 提示词；玩家可在设置页关掉
+      if (p.useMemory !== false) {
+        boot.textContent = '读取你的 AI 的经验…';
+        memory = await loadMemory(sync.call, memoryScope(p.keyMeta)).catch(() => null);
+      }
       const relay = createRelayTransport({
-        cfg, call: sync.call, keyId: p.keyId, matchId, reasoning: p.keyMeta.reasoning,
+        cfg, call: sync.call, keyId: p.keyId, matchId, thinking: p.thinking,
         onCall: (i) => {
           usage.calls++;
           if (!i.ok) usage.failed++;
@@ -216,6 +223,7 @@ async function startMatch(setup, { sameSeed = false } = {}) {
       ctrls.push(createPlanner({
         map: match.map, seat: 0, cfg, seed: match.seed, pool: pools.byok, persona: p.persona,
         autonomy: p.autonomy, safetyGate: p.safetyGate !== false, callCap: p.callCap || 0, transport: relay,
+        memory: memory ? memory.text : '',
       }));
     } else {
       ctrls.push(createPlanner({ map: match.map, seat: 0, cfg, seed: match.seed, pool: pools[p.llm], persona: p.persona, transport: transport(p.llm) }));
@@ -244,7 +252,10 @@ async function startMatch(setup, { sameSeed = false } = {}) {
   const playerAI = p.mode === 'prompt' || p.mode === 'byok' ? ctrls[0] : null;
   const strategy = p.mode === 'byok' ? String(p.persona || '').slice(0, 2000) : '';
   const players = p.mode === 'byok'
-    ? [{ seat: 0, provider: p.keyMeta.provider, model: p.keyMeta.model, autonomy: p.autonomy, safetyGate: p.safetyGate !== false, strategyHash: hex8(fnv1a(strategy)) }]
+    ? [{
+      seat: 0, provider: p.keyMeta.provider, model: p.keyMeta.model, autonomy: p.autonomy, safetyGate: p.safetyGate !== false, strategyHash: hex8(fnv1a(strategy)),
+      thinking: isThinking(p.thinking) ? p.thinking : DEFAULT_THINKING, ...(memory && memory.text ? { memoryHash: hex8(fnv1a(memory.text)) } : {}),
+    }]
     : undefined;
 
   disposeGame();
@@ -282,13 +293,25 @@ async function startMatch(setup, { sameSeed = false } = {}) {
     sched.on('spectate', () => hud.toast(`你已结算，切到 ${cfg.motion.spectateSpeed}× 观战`, 2400)),
     sched.on('manual', (e) => hud.toast(`脚本${e.reason}，已切回手动操作`, 3200)),
     sched.on('end', ({ state }) => {
+      const record = sched.toJSONL();
+      // 复盘时间线（批次 6）：由对局记录重放出每次决策的结局，与对局中给模型看的会话同一套规则
+      let timeline = null;
+      if (p.mode === 'byok') {
+        try {
+          timeline = matchTimeline(record, cfg, 0);
+        } catch (e) {
+          console.warn('复盘时间线生成失败', e);
+        }
+      }
       const mine = p.mode === 'byok'
-        ? { report: playerAI.report(), usage: { ...usage }, l3: pool.stats().l3, label: `${p.keyMeta.providerLabel || p.keyMeta.provider} / ${p.keyMeta.model}` }
+        ? {
+          report: playerAI.report(), usage: { ...usage }, l3: pool.stats().l3, label: `${p.keyMeta.providerLabel || p.keyMeta.provider} / ${p.keyMeta.model}`,
+          timeline, talk, thinking: p.thinking, memory: memory ? { games: memory.games, chars: Array.from(memory.text).length } : null,
+        }
         : null;
       // 模式 B 的调用次数已在思路执行报告里（以服务器账本为准），标题行不再重复
       hud.showEnd(sched, game && game.usesLLM && !mine ? pool.stats() : null, mine);
       const ranking = rankActors(state.actors, cfg);
-      const record = sched.toJSONL();
       saveRecord({
         matchId, seed, endTurn: state.endTurn, seats: seats.map((s) => s.tag),
         ranking: ranking.map((r) => ({ seat: r.seat, place: r.place, score: r.score, status: r.status })),
@@ -302,11 +325,23 @@ async function startMatch(setup, { sameSeed = false } = {}) {
           hud.setCompare(compareText(ranking.find((r) => r.seat === 0), base, setup.opponents.some((o) => o.brain === 'proxy' || o.brain === 'script')));
         }, 50);
         // 用量以服务器账本为准：客户端超时放弃的那次，服务器仍等到上游回来并记账（服务商照样计费）
-        sync.call('GET', `/api/v1/usage?matchId=${matchId}`).then((r) => {
+        const refreshUsage = () => sync.call('GET', `/api/v1/usage?matchId=${matchId}`).then((r) => {
           const s0 = r.status === 200 && r.json.match ? r.json.match.seats.filter((x) => x.seat === 0) : [];
           if (!s0.length) return;
           hud.setUsage(mine, s0.reduce((a, x) => ({ calls: a.calls + x.calls, in: a.in + x.tokensIn, out: a.out + x.tokensOut }), { calls: 0, in: 0, out: 0 }));
         });
+        refreshUsage();
+        // 赛后让模型自己写经验（批次 6 harness）：熔断或玩家关掉时不写
+        if (p.useMemory !== false && p.autoMemory !== false && !mine.l3 && timeline) {
+          hud.setMemory('正在让你的 AI 总结这局的经验…');
+          writeMemory({
+            call: sync.call, cfg, keyId: p.keyId, matchId, thinking: p.thinking, scope: memoryScope(p.keyMeta), memory,
+            strategy, recordJSONL: record, mapSize: setup.mapSize,
+          }).then((w) => {
+            hud.setMemory(`经验已更新：累计 ${w.games} 局 · ${Array.from(w.text).length} 字${w.compressed ? '（超长，已让模型压缩）' : ''} · 下一局开局自动带上；设置页可查看 / 编辑 / 清空`, w.text);
+            refreshUsage();
+          }).catch((e) => hud.setMemory(`这局的经验没写成：${e.message}（不影响对局记录）`));
+        }
       }
     }),
   ];
@@ -416,7 +451,7 @@ function openSetup() {
 const setupUi = createSetup(setupRoot, {
   probe: () => probeProxy(),
   trial: async (code, seedText) => {
-    const cfg = makeConfig(matchOverrides('script', setupUi.setup.mapSize, setupUi.setup.vision));
+    const cfg = makeConfig(matchOverrides('script', setupUi.setup.mapSize));
     const m = createMatch(seedText ? parseSeed(seedText) : 1, cfg);
     return testScript({ code, map: m.map, seat: 0, cfg, seed: m.seed, obs: observe(m.map, m.state, 0, cfg, { patch: false, events: [] }) });
   },
@@ -428,7 +463,22 @@ const setupUi = createSetup(setupRoot, {
   },
   onStart: (s) => startMatch(s),
   history: () => sync.listMine(10),
-  llm: { call: sync.call },
+  llm: {
+    call: sync.call,
+    // 思路试跑 / A/B（批次 6 P3）：经服务器中转调用玩家自己的模型；陪练 = 内置「预判对手」脚本 × 3
+    trial: async ({ size, seeds, variant, onProgress, signal }) => {
+      const p = setupUi.setup.player;
+      const aware = await loadScript('builtin:aware');
+      const spec = { kind: 'script', ...aware };
+      return runLlmTrial({
+        size, seeds, signal, onProgress, concurrency: 2,
+        variant: { provider: p.keyMeta.provider, model: p.keyMeta.model, ...variant },
+        opponents: [spec, spec, spec],
+        makeScript: ({ spec: sp, seat, match, cfg }) => createScriptController({ code: sp.code, map: match.map, seat, cfg, seed: match.seed, isPlayer: false }),
+        makeTransport: ({ matchId, onCall }) => createRelayTransport({ cfg: makeConfig(matchOverrides('byok', size)), call: sync.call, keyId: p.keyId, matchId, thinking: variant.thinking, onCall }),
+      });
+    },
+  },
   onResume: () => {
     setupUi.hide();
     if (game) game.sched.setPaused(false);
@@ -559,7 +609,6 @@ frameLoop((t, dt) => {
   const q = new URLSearchParams(location.search);
   if (q.get('seed')) setupUi.patch({ seed: q.get('seed') });
   if (isMapSize(q.get('size'))) setupUi.patch({ mapSize: q.get('size') });
-  if (isVision(q.get('vision'))) setupUi.patch({ vision: q.get('vision') });
   if (q.get('mode') && ['manual', 'script', 'byok'].includes(q.get('mode'))) {
     const s = setupUi.setup;
     s.player.mode = q.get('mode');

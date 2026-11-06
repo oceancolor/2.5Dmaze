@@ -7,7 +7,7 @@
 import { request as httpRequest } from 'node:http';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { PROVIDERS, checkBaseUrl, extraBody, outputBudget } from '../../server/providers.mjs';
+import { PROVIDERS, THINKING, checkBaseUrl, thinkingPlan } from '../../server/providers.mjs';
 import { chatCompletion, httpsUpstream } from '../../server/llm-relay.mjs';
 import { LOCAL_KEY_ID } from './vault.mjs';
 
@@ -22,6 +22,7 @@ export const providerLabel = (id) => (LOCAL_PROVIDERS[id] ? LOCAL_PROVIDERS[id].
 export function localProviderList() {
   return Object.entries(LOCAL_PROVIDERS).map(([id, p]) => ({
     id, label: p.label, baseUrl: p.baseUrl, model: p.model, verified: p.verified, note: p.note ?? '', local: Boolean(p.local),
+    thinking: p.think ? THINKING.filter((l) => p.think[l]) : ['off'],
   }));
 }
 
@@ -89,9 +90,9 @@ export function loopbackUpstream({ url, headers, body, timeoutMs }) {
 const MODEL = /^[\w.:/@-]{1,80}$/;
 const API_KEY = /^[\x21-\x7e]{8,400}$/;
 const ROLES = new Set(['system', 'user', 'assistant']);
-const KINDS = new Set(['plan', 'repair', 'test']);
+const KINDS = new Set(['plan', 'repair', 'test', 'memory']);
 const MAX_CHARS = 32000;
-const TIMEOUT = { min: 5000, normal: 40000, max: 90000 };
+const TIMEOUT = { min: 5000, max: 150000 };
 
 const fail = (error, message) => ({ ok: false, error, message });
 const monthOf = (t) => new Date(t).toISOString().slice(0, 7);
@@ -175,18 +176,24 @@ export function createDirect({ vault, ledgerFile, now, upstreams = {} }) {
       }
       if (chars > MAX_CHARS) return { ok: false, kind: 'bad', message: `messages 合计超过 ${MAX_CHARS} 字符` };
       const kind = KINDS.has(b.kind) ? b.kind : 'plan';
-      const maxTokens = outputBudget(k.provider, b.max_tokens, k.reasoning);
+      // 思考档位（批次 6）：与服务器中转同一张表；本机模型（自定义）按 key 的「推理模型」勾选
+      const tp = thinkingPlan(k.provider, b.thinking, { requested: b.max_tokens, reasoning: k.reasoning });
+      const maxTokens = tp.maxTokens;
       const temperature = Number.isFinite(b.temperature) ? Math.min(1, Math.max(0, b.temperature)) : 0;
-      const timeoutMs = Number.isFinite(b.timeoutMs) ? Math.min(TIMEOUT.max, Math.max(TIMEOUT.min, b.timeoutMs)) : TIMEOUT.normal;
-      const r = await chatCompletion({
-        base: k.baseUrl, model: k.model, apiKey: k.apiKey, messages: msgs, maxTokens, temperature,
-        extra: extraBody(k.provider, k.reasoning), timeoutMs,
-        upstream: k.baseUrl.startsWith('http://') ? up.loopback : up.https,
-        now,
-      });
+      const timeoutMs = Number.isFinite(b.timeoutMs) ? Math.min(TIMEOUT.max, Math.max(TIMEOUT.min, b.timeoutMs)) : tp.timeoutMs;
+      const upstream = k.baseUrl.startsWith('http://') ? up.loopback : up.https;
+      let r = await chatCompletion({ base: k.baseUrl, model: k.model, apiKey: k.apiKey, messages: msgs, maxTokens, temperature, extra: tp.extra, timeoutMs, upstream, now });
+      let level = tp.level;
+      // 思考用光预算、答案为空 → 用「关」档补问一次（与服务器中转一致）
+      if (r.ok && level !== 'off' && r.finish === 'length' && !String(r.text || '').trim()) {
+        note(r);
+        const off = thinkingPlan(k.provider, 'off', { requested: b.max_tokens, reasoning: false });
+        r = await chatCompletion({ base: k.baseUrl, model: k.model, apiKey: k.apiKey, messages: msgs, maxTokens: off.maxTokens, temperature, extra: off.extra, timeoutMs: off.timeoutMs, upstream, now });
+        level = 'off';
+      }
       note(r);
       if (r.ok) vault.touch(k.id);
-      return r;
+      return r.ok ? { ...r, thinking: level } : r;
     },
 
     /** 本月 / 累计（本机统计）。形状同服务器 GET /api/v1/usage，设置页共用一套显示。 */

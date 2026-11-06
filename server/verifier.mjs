@@ -5,26 +5,25 @@
 //   unverifiable  规则版本不是本服务器的内核版本；记录照存
 // 证明不了「意图来自谁」（人手 / 外挂 / 某个模型），见 06 §6.3。
 
-import { DEFAULT_CONFIG, makeConfig } from '../src/config/default.config.js';
-import { MAP_SIZE_IDS, matchOverrides } from '../src/config/map-sizes.js';
-import { VISION_IDS } from '../src/config/vision-modes.js';
-import { canonicalJSON, configHash } from '../src/core/hash.js';
+import { DEFAULT_CONFIG } from '../src/config/default.config.js';
+import { knownConfigs } from '../src/config/known.js';
+import { canonicalJSON } from '../src/core/hash.js';
 import { rankActors } from '../src/core/scoring.js';
 import { RECORD_VERSIONS } from '../src/record/recorder.js';
 import { replay, ReplayMismatch } from '../src/record/replayer.js';
 import { HttpError } from './http.mjs';
 
 export const RULES_VERSION = DEFAULT_CONFIG.rulesVersion;
+/** 本服务器能校验的规则版本：当前版本 + 旧版本（旧配置冻结在 src/config/legacy.js）。 */
+export const SUPPORTED_RULES = Object.freeze([RULES_VERSION, 'SPEC-0.1']);
 const SEATS = DEFAULT_CONFIG.spawns.length;
 
 /**
- * 服务器认可的配置：玩家通道 × 地图规格 × 视野规则（configHash 覆盖整份配置）。
- * 视野规则缺省 radius 时不加覆盖，XL + radius 与引入规格 / 视野规则前同一个哈希，旧记录照常校验。
+ * 服务器认可的配置（configHash 覆盖整份配置）：
+ *   当前版本（SPEC-0.2，批次 6 起）：玩家通道 × 地图规格，视野全公开
+ *   SPEC-0.1：玩家通道 × 地图规格 × 当时的视野规则（radius 默认 / full · delayed · radar 实验），按冻结快照重建，逐字节一致
  */
-const KNOWN = new Map(Object.keys(DEFAULT_CONFIG.rules.staminaByMode).flatMap((mode) => MAP_SIZE_IDS.flatMap((mapSize) => VISION_IDS.map((vision) => {
-  const cfg = makeConfig(matchOverrides(mode, mapSize, vision));
-  return [configHash(cfg), { cfg, mode, mapSize, vision }];
-}))));
+const KNOWN = knownConfigs();
 const MAX_TURNS = Math.max(...[...KNOWN.values()].map((k) => k.cfg.rules.maxTurns));
 const MAX_LINES = MAX_TURNS * 6 + 8;
 
@@ -49,6 +48,7 @@ export function seatSource(tag) {
 }
 
 const ORIGINS = new Set(['human', 'agent', 'builtin']);
+const THINKING = new Set(['off', 'low', 'high']);
 
 /** meta.scripts（统一编程接口 v2）：脚本座位的说明，只做形状检查（名称 / 作者是自报的展示信息）。 */
 function checkScripts(list) {
@@ -71,14 +71,19 @@ function checkPlayers(p) {
     for (const k of ['provider', 'model', 'strategyHash']) if (x[k] !== undefined && (typeof x[k] !== 'string' || !SHORT.test(x[k]))) throw bad(`meta.players[].${k}`);
     if (x.autonomy !== undefined && !AUTONOMIES.has(x.autonomy)) throw bad('meta.players[].autonomy');
     if (x.safetyGate !== undefined && typeof x.safetyGate !== 'boolean') throw bad('meta.players[].safetyGate');
+    if (x.thinking !== undefined && !THINKING.has(x.thinking)) throw bad('meta.players[].thinking');
+    if (x.memoryHash !== undefined && !HEX8.test(x.memoryHash)) throw bad('meta.players[].memoryHash');
   }
 }
+
+/** 计划行里不算「一次决策」的来源：目标队列推进、引擎安全覆盖、放弃条件触发（批次 6 harness）。 */
+const NON_DECISION = new Set(['queue', 'guard', 'abandon']);
 
 /** 计划行 → 每座位的决策统计（复盘 / 报告用；记录里自报，不影响校验结论）。 */
 export function planStats(lines) {
   const per = new Map();
   for (const L of lines) {
-    if (L.t !== 'plan') continue;
+    if (L.t !== 'plan' || NON_DECISION.has(L.src)) continue;
     let s = per.get(L.seat);
     if (!s) {
       s = { seat: L.seat, decisions: 0, applied: 0, yes: 0, partial: 0, override: 0, invalid: 0, stale: 0, failed: 0 };
@@ -167,11 +172,11 @@ export function verifyRecord(text) {
   const plans = lines.filter((l) => l.t === 'plan').length;
   const base = { meta, ranking: end.ranking, turns: end.n, plans, seatPlans: planStats(lines), playerMode: null, mapSize: null, vision: null };
 
-  if (meta.rulesVersion !== RULES_VERSION) {
-    return { ...base, verify: 'unverifiable', verifyTurn: null, verifyNote: `规则版本 ${meta.rulesVersion} 不是本服务器的内核版本（${RULES_VERSION}）` };
+  if (!SUPPORTED_RULES.includes(meta.rulesVersion)) {
+    return { ...base, verify: 'unverifiable', verifyTurn: null, verifyNote: `规则版本 ${meta.rulesVersion} 不是本服务器能校验的版本（${SUPPORTED_RULES.join(' / ')}）` };
   }
   const known = KNOWN.get(meta.configHash);
-  if (!known) {
+  if (!known || known.cfg.rulesVersion !== meta.rulesVersion) {
     return { ...base, verify: 'mismatch', verifyTurn: 0, verifyNote: 'configHash 不是服务器认可的配置' };
   }
   base.playerMode = known.mode;

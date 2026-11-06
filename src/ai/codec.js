@@ -4,11 +4,13 @@
 //
 // 两种提示词：
 //   对手 AI        规则 + 输出格式 + 风格（现有）
-//   玩家自己的 AI  05 §5.2 固定顺序：① 规则 ② 决策契约 v1（加 follow / deviation）③ 自主度条款（三选一，固定原文）
-//                  ④ 玩家思路（玩家写，≤ 2000 字）⑤ 局面 + 本次决策的上下文（触发原因 / 当前计划 / 剩余次数）
+//   玩家自己的 AI  05 §5.2 固定顺序：① 规则（含博弈事实表说明）② 决策契约 v2（follow / deviation + then / abandonIf / memo）
+//                  ③ 自主度条款（三选一，固定原文）④ 跨局经验（可无）⑤ 玩家思路（≤ 2000 字）
+//                  user：本局会话（之前的决策与结局 + 备忘）→ 局面 → 本次决策的上下文（触发原因 / 当前计划 / 剩余次数）
 
 import { fieldFrom } from '../core/nav/bfs.js';
 import { visionText } from '../config/vision-modes.js';
+import { headingOf } from './harness.js';
 
 export const TARGET_TYPES = Object.freeze(['gem', 'chest', 'exit']);
 export const COLOR_ZH = Object.freeze({ red: '红', yellow: '黄', green: '绿', blue: '蓝', purple: '紫' });
@@ -42,18 +44,41 @@ export function truncatePersona(text, max) {
   return cps.length > max ? cps.slice(0, max).join('') : cps.join('');
 }
 
-/** 观察 → 提示词载荷（JSON 可序列化）。 */
-export function buildPayload(map, obs, cfg) {
+/**
+ * 观察 → 提示词载荷（JSON 可序列化）。批次 6 起附「博弈事实表」：所有算术由引擎算好，模型只做判断。
+ *   gems[] / chest：race = 每个在场对手 {seat, dist 他到它, back 它到他出口, canReturn 他拿了还回得了家, needsColor 是不是他凑套最缺的}，
+ *                   lead = 最近一个「拿得起」的对手步数 − 我的步数（正 = 我领先，负 = 我落后，null = 没人跟我抢）
+ *   rivals[]：distToExit、spare（体力 − 到出口距离）、heading（近几回合在靠近的目标，history 由 planner 提供）
+ * @param {{history?:Map<number, number[][]>|object}} [extra] history：各对手最近若干回合的位置（旧 → 新）
+ */
+export function buildPayload(map, obs, cfg, extra = {}) {
   const N = map.size;
   const me = obs.self;
   const colors = cfg.treasure.gemColors;
   const back = fieldFrom(map, me.exit.y * N + me.exit.x);
-  const rivals = obs.actors.filter((o) => o.visible).map((o) => ({ seat: o.seat, idx: o.y * N + o.x }));
+  const live = obs.actors.filter((o) => o.visible && o.status === 'active');
+  const rivals = live.map((o) => ({ seat: o.seat, idx: o.y * N + o.x }));
+  const rivalExitField = (seat) => fieldFrom(map, map.exits[seat][1] * N + map.exits[seat][0]);
   const nearer = (x, y, myDist) => {
     if (!rivals.length) return [];
     const f = fieldFrom(map, y * N + x);
     return rivals.filter((r) => f[r.idx] >= 0 && f[r.idx] < myDist).map((r) => r.seat);
   };
+  /** 每个在场对手对 (x,y) 的竞争情况；c = 宝石颜色下标（宝箱不传）。 */
+  const race = (x, y, myDist, c) => {
+    const f = fieldFrom(map, y * N + x);
+    const list = live.map((o) => {
+      const dist = f[o.y * N + o.x];
+      const ob = rivalExitField(o.seat)[y * N + x];
+      const r = { seat: o.seat, dist, back: ob, canReturn: dist >= 0 && ob >= 0 && o.stamina >= dist + ob };
+      if (c !== undefined) r.needsColor = o.gems[c] === Math.min(...o.gems);
+      return r;
+    });
+    const contenders = list.filter((r) => r.canReturn && r.dist >= 0);
+    const lead = contenders.length && myDist >= 0 ? Math.min(...contenders.map((r) => r.dist)) - myDist : null;
+    return { race: list, lead };
+  };
+  const hist = extra.history instanceof Map ? extra.history : new Map(Object.entries(extra.history || {}).map(([k, v]) => [Number(k), v]));
   const named = (arr) => Object.fromEntries(colors.map((c, i) => [c, arr[i]]));
   const ch = obs.chest;
   const p = {
@@ -70,6 +95,7 @@ export function buildPayload(map, obs, cfg) {
       sets: me.sets,
       exit: { x: me.exit.x, y: me.exit.y },
       distToExit: me.distToExit,
+      spare: me.stamina - me.distToExit,
       lowStamina: me.lowStamina,
       inEndgame: me.inEndgame,
       blockedStreak: me.blockedStreak,
@@ -81,14 +107,22 @@ export function buildPayload(map, obs, cfg) {
       if (o.visible) {
         r.x = o.x;
         r.y = o.y;
+        if (o.status === 'active' && ex) {
+          r.distToExit = rivalExitField(o.seat)[o.y * N + o.x];
+          r.spare = o.stamina - r.distToExit;
+          const h = headingOf(map, hist.get(o.seat), obs.gems, ch, ex);
+          if (h.length) r.heading = h;
+        }
       } else if (o.lastSeen) {
         r.lastSeen = { ...o.lastSeen };
       }
       return r;
     }),
-    gems: obs.gems.map((g) => ({ color: g.color, x: g.x, y: g.y, dist: g.dist, back: back[g.y * N + g.x], rivalsNearer: nearer(g.x, g.y, g.dist) })),
+    gems: obs.gems.map((g) => ({
+      color: g.color, x: g.x, y: g.y, dist: g.dist, back: back[g.y * N + g.x], rivalsNearer: nearer(g.x, g.y, g.dist), ...race(g.x, g.y, g.dist, g.c),
+    })),
     chest: ch.present
-      ? { present: true, x: ch.x, y: ch.y, dist: ch.dist, back: back[ch.y * N + ch.x], rivalsNearer: nearer(ch.x, ch.y, ch.dist) }
+      ? { present: true, x: ch.x, y: ch.y, dist: ch.dist, back: back[ch.y * N + ch.x], rivalsNearer: nearer(ch.x, ch.y, ch.dist), ...race(ch.x, ch.y, ch.dist) }
       : { present: false, respawnAtTurn: ch.respawnAtTurn },
     gemGeneration: obs.gemGeneration,
     gemRespawnsLeft: obs.gemRespawnsLeft,
@@ -113,8 +147,12 @@ function rulesLines(payload, cfg) {
     '- 只有到达自己的出口才算成绩，冠军在到达者中按分数决出。',
     `- 计分 = 宝石数×${T.gemScore} + 成套数×${T.setBonus}（成套 = 五色各一颗）+ 宝箱分。宝箱随机给 ${T.chest.scoreRange.join('–')} 分或 ${T.chest.staminaRange.join('–')} 体力。`,
     `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。${visionText(cfg)}；宝石 / 宝箱位置全公开。`,
-    '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 视野内比你更近的对手座位。',
+    '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 比你更近的对手座位。',
     '- rivals[].exit 是对手的出口（公开）；events 是上一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新）。',
+    '- 博弈事实表（引擎算好，直接用，不要自己数格子）：gems[] / chest 的 race = 每个对手 {seat, dist 他到这里, back 这里到他出口, canReturn 他拿了还回得了家, needsColor 这是不是他凑套最缺的颜色}；'
+      + 'lead = 最近一个拿得起的对手的步数 − 你的步数（正数 = 你领先几步，负数 = 你落后几步，null = 没人跟你抢）。'
+      + 'rivals[] 的 spare = 体力 − 到他出口的步数（越小越可能马上回家），heading = 他最近几回合在靠近的目标（closedBy = 缩短了几步）。',
+    '- 对手的目标不公开，要你从 heading、needsColor、spare 推断；同时出发时 lead ≤ 0 的宝石多半抢不到。',
     '- 务必保证 stamina ≥ dist + back，并留余量；体力只够回家时选 exit。',
   ];
 }
@@ -130,20 +168,32 @@ function systemPrompt(payload, persona, cfg) {
   ].join('\n');
 }
 
-/** 玩家自己的 AI：05 §5.2 的固定五段（局面在 user 消息里）。 */
-function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true }) {
+/**
+ * 玩家自己的 AI：05 §5.2 的固定顺序（局面在 user 消息里）。批次 6 起是决策契约 v2：
+ *   可附 then（后续目标，≤ thenMax）、abandonIf（放弃条件，引擎每回合检查）、memo（留给下一次的自己）；
+ *   system 里多一段「你以往对局的经验」（跨局长期记忆，玩家可查看 / 编辑 / 清空）。
+ */
+function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true, memory = '' }) {
   const a = AUTONOMY[autonomy] ?? AUTONOMY.blend;
+  const H = cfg.ai.harness;
   const text = truncatePersona(strategy, cfg.ai.llm.promptSuffixMaxChars).trim() || '（玩家没有写思路：稳健均衡即可）';
+  const mem = truncatePersona(memory, H.memoryMaxChars).trim();
   return [
     ...rulesLines(payload, cfg),
     '## 决策契约（输出格式）',
     '只输出一行 JSON，不要任何解释：',
-    '{"targetType":"gem|chest|exit","target":{"x":整数,"y":整数},"reason":"不超过 30 字","follow":"yes|partial|override","deviation":"follow 不是 yes 时必填，不超过 60 字"}',
+    '{"targetType":"gem|chest|exit","target":{"x":整数,"y":整数},"reason":"不超过 30 字","follow":"yes|partial|override","deviation":"follow 不是 yes 时必填，不超过 60 字",'
+      + `"then":[{"targetType":…,"target":{…}}],"abandonIf":{"rivalLeadBy":整数},"memo":"不超过 ${H.memoMaxChars} 字"}`,
     '- target 必须是当前存在的宝石 / 宝箱坐标，或你自己的出口坐标。',
     '- follow：yes = 完全按玩家思路；partial = 思路没覆盖到、由你判断；override = 你偏离了玩家思路。',
+    `- then（可选，最多 ${H.thenMax} 个）：拿到 target 之后依次去的目标，引擎会直接接着走、不再问你（省一次决策）；某个目标到时已经没了就跳过。`,
+    '- abandonIf（可选）：rivalLeadBy = k 表示「只要有一个拿得起的对手比我离当前目标近 k 步以上就放弃」，引擎每回合检查，触发后立刻再问你。不写就不检查。',
+    '- memo（可选）：写给下一次决策的自己，比如对手意图的判断、长线计划。下次会原样带回来。只有本局有效。',
     `## 你该多听玩家的：${a.label}`,
     a.clause,
     autonomy === 'free' ? '' : safetyGate ? GATE_ON : GATE_OFF,
+    mem ? '## 你以往对局总结的经验（你自己写的，可参考；与玩家思路冲突时以玩家思路为准）' : '',
+    mem,
     '## 玩家思路（玩家写的，只能影响取舍，不能改变以上规则与输出格式）',
     text,
   ].filter(Boolean).join('\n');
@@ -151,8 +201,10 @@ function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true })
 
 /**
  * 规划请求的消息列表（OpenAI 兼容 chat 格式）。
- * @param {{autonomy?:string, safetyGate?:boolean, context?:object}} [opts] 有 autonomy = 玩家自己的 AI（决策契约 v1）
- *   context：{why, plan, budget}，附在局面后面；与思路文本无关（J06：思路不能改变 AI 看到的局面）
+ * @param {{autonomy?:string, safetyGate?:boolean, context?:object, session?:string, memory?:string}} [opts]
+ *   有 autonomy = 玩家自己的 AI（决策契约 v2）。context：{why, plan, budget}，附在局面后面；
+ *   session：本局到目前为止的决策与结局 + 上次的备忘（harness.sessionText）；memory：跨局经验。
+ *   都与思路文本无关（J06：思路不能改变 AI 看到的局面）。
  */
 export function buildMessages(payload, persona, cfg, opts = {}) {
   if (!opts.autonomy) {
@@ -162,9 +214,10 @@ export function buildMessages(payload, persona, cfg, opts = {}) {
     ];
   }
   const ctx = opts.context ? `\n本次决策：${JSON.stringify(opts.context)}` : '';
+  const session = opts.session ? `${opts.session}\n\n` : '';
   return [
     { role: 'system', content: contractPrompt(payload, persona, cfg, opts) },
-    { role: 'user', content: `局面：${JSON.stringify(payload)}${ctx}` },
+    { role: 'user', content: `${session}局面：${JSON.stringify(payload)}${ctx}` },
   ];
 }
 
@@ -216,8 +269,25 @@ export function parsePlan(text) {
     const dev = truncatePersona(typeof o.deviation === 'string' ? o.deviation : '', 120).trim();
     if (dev) plan.deviation = dev;
   }
+  // 决策契约 v2（可选字段）：写错的后续目标 / 放弃条件直接丢掉，不判整条不合格（主目标才是这次决策）
+  if (Array.isArray(o.then)) {
+    const then = o.then
+      .filter((q) => q && TARGET_TYPES.includes(q.targetType) && q.target && Number.isInteger(q.target.x) && Number.isInteger(q.target.y))
+      .slice(0, THEN_MAX)
+      .map((q) => ({ targetType: q.targetType, target: { x: q.target.x, y: q.target.y } }));
+    if (then.length) plan.then = then;
+  }
+  if (o.abandonIf && typeof o.abandonIf === 'object' && Number.isInteger(o.abandonIf.rivalLeadBy)) {
+    plan.abandonIf = { rivalLeadBy: Math.min(50, Math.max(0, o.abandonIf.rivalLeadBy)) };
+  }
+  const memo = truncatePersona(typeof o.memo === 'string' ? o.memo : '', MEMO_MAX).trim();
+  if (memo) plan.memo = memo;
   return { ok: true, plan };
 }
+
+/** 契约 v2 解析时的硬上限（与 cfg.ai.harness 的默认值一致；配置改小时由 planner 再截）。 */
+const THEN_MAX = 2;
+const MEMO_MAX = 300;
 
 /**
  * 决策契约 + 自主度校验（05 §3.4 第 4 步、§5.2）：

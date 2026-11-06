@@ -16,11 +16,21 @@
 //   自主度：free 不校验 follow；blend 统计偏离；strict 的 override 判不合格。
 //   safetyGate=false：关闭自保闸门（玩家选择「允许冒险」）。callCap：本座位每局调用上限（含修复）。
 //   请求附带本次决策的上下文 {why, plan, budget}；思路文本只进 system 提示词，不影响局面（J06）。
+//
+// harness（批次 6，玩家自己的 AI）：一局一个会话。
+//   每次请求带上「本局到目前为止」（harness.sessionText：更早的决策折成摘要、最近 N 条原样、每条的结局）与模型上次的 memo；
+//   局面附博弈事实表（codec.buildPayload：各对手到各宝物的步数、能否回家、动向 heading）；
+//   契约 v2：then 目标队列（拿到当前目标后引擎直接接着走，记 plan 行 src 'queue'）、
+//            abandonIf 放弃条件（引擎每回合检查，触发记 src 'abandon' 并立刻重问）；
+//   自保闸门第一次改写某个计划时记 src 'guard'。这三种都不算「一次决策」（服务器 planStats 跳过）。
+//   跨局经验 memory 进 system 提示词（只读，由外层赛后让模型自己写 / 压缩）。
 
 import { STREAM, createStream, subSeed } from '../core/rng.js';
 import { fieldFrom } from '../core/nav/bfs.js';
+import { cheb } from '../core/geom.js';
 import { chooseTarget, stepToward, isAffordable } from './heuristic.js';
 import { buildPayload, checkContract, parsePlan, validatePlan } from './codec.js';
+import { createTracker, sessionText } from './harness.js';
 
 const L3_REASON = {
   unreachable: '代理不可达',
@@ -98,11 +108,18 @@ export function createAgentPool(cfg) {
  *   transport 可以同步回调（mock 快进）也可以异步（真网络）；reason ∈ timeout | unreachable | auth | 5xx | 429 | http
  *   persona：对手 AI 的风格文本；玩家自己的 AI 时是「玩家思路」
  */
-export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autonomy = null, safetyGate = true, callCap = 0, transport }) {
+export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autonomy = null, safetyGate = true, callCap = 0, memory = '', transport }) {
   const A = cfg.ai;
+  const H = A.harness;
   const L = A.planLatencyTurns;
   const N = map.size;
   const contract = Boolean(autonomy);
+  // harness 状态（只有玩家自己的 AI 用）
+  const tracker = contract ? createTracker(map, seat) : null;
+  let memo = '';
+  let queue = []; // then 目标队列（当前计划之后依次去）
+  const hist = new Map(); // seat → 最近 trendTurns+1 回合的位置（对手动向 heading）
+  const exitFieldOf = (s) => fieldFrom(map, map.exits[s][1] * N + map.exits[s][0]);
   const st = createStream(subSeed(subSeed(seed >>> 0, STREAM.AI), seat));
   const mem = { yieldSeat: -1, yieldLeft: 0 };
   const [ex, ey] = map.exits[seat];
@@ -121,7 +138,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   const log = [];
   const stats = {
     requests: 0, repairs: 0, applied: 0, invalid: 0, rejected: 0, stale: 0, failed: 0, timeouts: 0,
-    events: 0, eventsSkipped: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0,
+    events: 0, eventsSkipped: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0, queued: 0, abandons: 0,
   };
   const follow = { yes: 0, partial: 0, override: 0 };
   const deviations = [];
@@ -144,6 +161,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       r.autonomy = autonomy;
       r.safetyGate = safetyGate;
       r.context = req.context;
+      r.session = req.session;
+      r.memory = memory;
     }
     transport(r, { deliver: (text) => deliver(id, text), fail: (reason, detail) => fail(id, reason, detail) });
   }
@@ -152,7 +171,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   function reject(text, error) {
     if (pending.kind === 'plan' && !pool.l3 && !capReached()) {
       const p = pending;
-      send('repair', { requestTurn: p.requestTurn, appliedTurn: p.appliedTurn, payload: p.payload, why: p.why, context: p.context, raw: text, error });
+      send('repair', { requestTurn: p.requestTurn, appliedTurn: p.appliedTurn, payload: p.payload, why: p.why, context: p.context, session: p.session, raw: text, error });
       return;
     }
     pending.status = 'failed';
@@ -187,7 +206,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     pool.noteError(reason, detail);
     if (reason === 'timeout' && pending.kind === 'plan' && !pool.l3 && !capReached()) {
       const p = pending;
-      send('repair', { requestTurn: p.requestTurn, appliedTurn: p.appliedTurn, payload: p.payload, why: p.why, context: p.context, raw: '', error: '超时' });
+      send('repair', { requestTurn: p.requestTurn, appliedTurn: p.appliedTurn, payload: p.payload, why: p.why, context: p.context, session: p.session, raw: '', error: '超时' });
       return;
     }
     pending.status = 'failed';
@@ -219,6 +238,9 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
           if (plan.follow !== 'yes') {
             deviations.push({ n: turn, follow: plan.follow, deviation: plan.deviation ?? '', reason: plan.reason, targetType: plan.targetType, target: plan.target });
           }
+          if (plan.memo) memo = plan.memo;
+          queue = (plan.then || []).slice(0, H.thenMax);
+          track(turn, p, plan.source, plan, obs);
         }
         log.push({ ...entry, source: plan.source, plan: p.result });
         return;
@@ -226,21 +248,84 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       if (validAtRequest(p.result, p.payload)) {
         stats.stale++;
         log.push({ ...entry, source: 'stale', plan: p.result, err: v.why });
+        note(turn, p, 'stale', p.result, v.why);
       } else {
         stats.invalid++;
         invalidStreak++;
         log.push({ ...entry, source: 'invalid', plan: p.result, err: v.why });
+        note(turn, p, 'invalid', p.result, v.why);
       }
     } else if (p.invalid) {
       stats.rejected++;
       invalidStreak++;
       log.push({ ...entry, source: 'invalid', plan: null, err: p.err });
+      note(turn, p, 'invalid', null, p.err);
     } else {
       stats.failed++;
       log.push({ ...entry, source: 'failed', plan: null, err: p.err });
+      note(turn, p, 'failed', null, p.err);
     }
     plan = null;
+    queue = [];
     lastFailTurn = turn;
+  }
+
+  const colorAt = (obs, t) => {
+    const g = obs.gems.find((q) => q.x === t.x && q.y === t.y);
+    return g ? g.color : null;
+  };
+
+  /** 会话追踪：新目标生效（与 harness.timelineFromRecord 同一套条目，复盘时由记录重放得到同样的结局）。 */
+  function track(turn, p, src, pl, obs, prevOutcome = 'switched') {
+    if (!tracker) return;
+    tracker.start({
+      n: turn, req: p ? p.requestTurn : turn, src, why: p ? p.why : null, targetType: pl.targetType, target: { ...pl.target },
+      color: pl.targetType === 'gem' ? colorAt(obs, pl.target) : null, reason: pl.reason ?? '', follow: pl.follow ?? null,
+      deviation: pl.deviation ?? '', memo: pl.memo ?? '', then: Array.isArray(pl.then) ? pl.then.length : 0, abandonIf: pl.abandonIf ?? null,
+    }, prevOutcome);
+  }
+
+  function note(turn, p, outcome, pl, err) {
+    if (!tracker) return;
+    tracker.note({ n: turn, req: p.requestTurn, src: outcome, why: p.why, outcome, err: err ?? '', targetType: pl ? pl.targetType : null, target: pl ? pl.target : null, reason: pl ? pl.reason ?? '' : '' });
+  }
+
+  /** 放弃条件：有一个拿得起的对手比我离当前目标近 k 步以上。返回原因文本或 null。 */
+  function abandonWhy(obs) {
+    if (!plan || !plan.abandonIf || plan.targetType === 'exit' || plan.guarded) return null;
+    const k = plan.abandonIf.rivalLeadBy;
+    const t = plan.target;
+    const f = fieldFrom(map, t.y * N + t.x);
+    const mine = f[obs.self.y * N + obs.self.x];
+    if (mine < 0) return null;
+    for (const o of obs.actors) {
+      if (!o.visible || o.status !== 'active') continue;
+      const d = f[o.y * N + o.x];
+      const back = exitFieldOf(o.seat)[t.y * N + t.x];
+      if (d < 0 || back < 0 || o.stamina < d + back) continue;
+      if (mine - d >= k) return `座位 ${o.seat} 比我近 ${mine - d} 步（条件 ≥ ${k}）`;
+    }
+    return null;
+  }
+
+  /** 当前目标拿到后接着走队列里的下一个（跳过已经没了的）。返回是否接上了。 */
+  function nextFromQueue(obs, turn) {
+    while (queue.length) {
+      const q = queue.shift();
+      const cand = { targetType: q.targetType, target: q.target };
+      if (!validatePlan(cand, obs).ok) continue;
+      const rest = queue.slice();
+      plan = {
+        ...cand, reason: '按上次的计划接着走', follow: plan ? plan.follow : 'yes', abandonIf: plan ? plan.abandonIf : undefined,
+        requestTurn: turn, appliedTurn: turn, source: 'queue', why: null, guarded: false,
+      };
+      stats.queued++;
+      const line = { targetType: cand.targetType, target: cand.target, reason: plan.reason, ...(rest.length ? { then: rest } : {}), ...(plan.abandonIf ? { abandonIf: plan.abandonIf } : {}) };
+      log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'queue', plan: line });
+      track(turn, null, 'queue', line, obs, 'got');
+      return true;
+    }
+    return false;
   }
 
   const planAlive = (obs) => plan && (plan.targetType === 'exit' || validatePlan(plan, obs).ok);
@@ -268,13 +353,43 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         return;
       }
       const me = obs.self;
+      // 「对手接近」：进入近身范围（entityRadius）。批次 6 起对手位置全公开，「进入视野」不再有意义
+      const R = cfg.vision.entityRadius;
       const vis = new Set();
-      for (const o of obs.actors) if (o.visible) vis.add(o.seat);
+      for (const o of obs.actors) if (o.visible && o.status === 'active' && cheb(o.x, o.y, me.x, me.y) <= R) vis.add(o.seat);
+      if (contract) {
+        tracker.observe(obs);
+        for (const o of obs.actors) {
+          if (!o.visible || o.status !== 'active') {
+            hist.delete(o.seat);
+            continue;
+          }
+          const h = hist.get(o.seat) || [];
+          h.push([o.x, o.y]);
+          if (h.length > H.trendTurns + 1) h.shift();
+          hist.set(o.seat, h);
+        }
+      }
       let complete = !plan;
       let event = null;
       if (plan && plan.targetType !== 'exit' && !validatePlan(plan, obs).ok) {
-        if (me.x === plan.target.x && me.y === plan.target.y) complete = true;
-        else event = 'targetLost';
+        if (me.x === plan.target.x && me.y === plan.target.y) complete = !(contract && nextFromQueue(obs, turn));
+        else {
+          event = 'targetLost';
+          queue = [];
+        }
+      }
+      let abandoned = null;
+      if (contract && !event && !complete && !pending) {
+        abandoned = abandonWhy(obs);
+        if (abandoned) {
+          stats.abandons++;
+          tracker.abandon(abandoned);
+          log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'abandon', plan: null, err: abandoned });
+          plan = null;
+          queue = [];
+          complete = true;
+        }
       }
       if (prev) {
         if (!event && (obs.gemGeneration > prev.gen || (obs.chest.present && !prev.chest))) event = 'refresh';
@@ -295,7 +410,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       const endgame = me.inEndgame;
       const interval = endgame ? A.replanIntervalEndgame : pool.pressure(seat) ? A.replanIntervalMax : A.replanInterval;
       let why = null;
-      if (complete && turn - lastFailTurn >= A.eventCooldownTurns) why = lastPlanTurn === -Infinity ? 'start' : 'complete';
+      if (abandoned) why = 'abandon';
+      else if (complete && turn - lastFailTurn >= A.eventCooldownTurns) why = lastPlanTurn === -Infinity ? 'start' : 'complete';
       else if (event) {
         if (turn - lastEventTurn < A.eventCooldownTurns || eventsUsed >= A.eventBudgetPerAgent) stats.eventsSkipped++;
         else why = event;
@@ -312,7 +428,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         stats.denied++;
         return;
       }
-      if (why !== 'complete' && why !== 'interval' && why !== 'start') {
+      if (why !== 'complete' && why !== 'interval' && why !== 'start' && why !== 'abandon') {
         eventsUsed++;
         lastEventTurn = turn;
         stats.events++;
@@ -320,7 +436,11 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       lastPlanTurn = turn;
       const ctx = context(turn);
       if (ctx) ctx.why = why;
-      send('plan', { requestTurn: turn, appliedTurn: turn + L, payload: buildPayload(map, obs, cfg), why, context: ctx });
+      send('plan', {
+        requestTurn: turn, appliedTurn: turn + L, why, context: ctx,
+        payload: buildPayload(map, obs, cfg, contract ? { history: hist } : {}),
+        session: contract ? sessionText(tracker.entries, memo, H.journalWindow) : undefined,
+      });
     },
 
     /** 有到期未回的请求 → 调度器必须等（§7.5）。 */
@@ -347,6 +467,12 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
             if (!plan.guarded) {
               plan.guarded = true;
               stats.guardPlans++;
+              queue = [];
+              if (contract) {
+                const line = { targetType: 'exit', target: { x: me.exit.x, y: me.exit.y }, reason: '体力不够去目标再回家，引擎改为回家' };
+                log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'guard', plan: line });
+                track(turn, null, 'guard', line, obs, 'guard');
+              }
             }
             source = 'guard';
             target = { type: 'exit', x: me.exit.x, y: me.exit.y };
@@ -386,8 +512,16 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         autonomy,
         safetyGate,
         invalidStreak,
+        memo,
+        queue: queue.length,
+        abandonIf: plan && plan.abandonIf ? plan.abandonIf : null,
         stats: { ...stats, eventsUsed, follow: { ...follow } },
       };
+    },
+
+    /** 本局会话（追踪器条目：每次决策的目标与结局）。复盘以记录重放为准（harness.timelineFromRecord），这里给对局中的 HUD 用。 */
+    session() {
+      return tracker ? { entries: tracker.entries.map((e) => ({ ...e })), memo } : null;
     },
 
     /** 思路执行报告（05 §8.3）：决策次数、遵循 / 部分 / 偏离 / 不合格 / 过期 / 引擎安全覆盖，偏离理由按回合。
@@ -407,6 +541,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         requests: stats.requests,
         repairs: stats.repairs,
         capped: stats.capped,
+        queued: stats.queued,
+        abandons: stats.abandons,
         deviations: deviations.slice(),
       };
     },

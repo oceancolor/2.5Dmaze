@@ -19,8 +19,9 @@ import { createMatch } from '../src/core/state.js';
 import { CLIENT_VERSION } from '../src/app/version.js';
 import { openStore } from '../server/store/db.mjs';
 import { createApp } from '../server/app.mjs';
-import { checkBaseUrl, guardedLookup, isPublicAddress, extraBody, outputBudget, PROVIDERS } from '../server/providers.mjs';
+import { checkBaseUrl, guardedLookup, isPublicAddress, thinkingPlan, PROVIDERS, RELAY_TIMEOUT_MS, THINK_BUDGET } from '../server/providers.mjs';
 import { createLlmLog } from '../server/llm-log.mjs';
+import { chatCompletion } from '../server/llm-relay.mjs';
 import { createVault, keyHint } from '../server/vault.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -32,7 +33,8 @@ const mid = (k) => `m${String(k).padStart(31, '0')}`;
 /** 从中转请求体里取回局面，用模拟大模型按契约作答（相当于一个守规矩的真模型）。 */
 function planFromBody(b) {
   const user = b.messages.find((m) => m.role === 'user').content;
-  const payload = JSON.parse(user.slice('局面：'.length).split('\n本次决策：')[0]);
+  const at = user.indexOf('局面：');
+  const payload = JSON.parse(user.slice(at + '局面：'.length).split('\n本次决策：')[0]);
   return mockPlan(payload, '', { contract: true });
 }
 
@@ -115,52 +117,126 @@ test('服务商预设：只留 HY4 / K3 / DeepSeek V4.1 Flash / GLM-5.3 Flash（
     assert.equal(PROVIDERS[id].baseUrl, MAAS, id);
     assert.equal(PROVIDERS[id].model, model, id);
   }
-  // 实测：HY4 / K3 / DeepSeek 认 thinking:disabled；GLM 对它回 400，只能 reasoning_effort:'low'
-  for (const id of ['hunyuan', 'kimi', 'deepseek']) {
-    assert.deepEqual(extraBody(id, false), { thinking: { type: 'disabled' } }, id);
-    assert.deepEqual(extraBody(id, true), {}, `${id} 勾推理模型才放开思考`);
+  // 思考档位表（2026-11-06 实测）：off 一律显式关；HY4 只能关；GLM 关不掉，「关」= effort low
+  const D = { thinking: { type: 'disabled' } };
+  const E = { thinking: { type: 'enabled' } };
+  const want = {
+    hunyuan: { off: [D, 'off'], low: [D, 'off'], high: [D, 'off'] },
+    kimi: { off: [{ reasoning_effort: 'low' }, 'off'], low: [{ reasoning_effort: 'high' }, 'low'], high: [E, 'high'] },
+    deepseek: { off: [D, 'off'], low: [{ reasoning_effort: 'low' }, 'low'], high: [{ reasoning_effort: 'high' }, 'high'] },
+    glm: { off: [{ reasoning_effort: 'low' }, 'off'], low: [{ reasoning_effort: 'high' }, 'low'], high: [E, 'high'] },
+  };
+  for (const [id, levels] of Object.entries(want)) {
+    for (const [lv, [extra, eff]] of Object.entries(levels)) {
+      const p = thinkingPlan(id, lv, { requested: 900 });
+      assert.deepEqual(p.extra, extra, `${id}/${lv}`);
+      assert.equal(p.level, eff, `${id}/${lv}`);
+      assert.equal(p.maxTokens, eff === 'off' ? Math.max(900, PROVIDERS[id].outputFloor || 0) : 900 + THINK_BUDGET[eff], `${id}/${lv} 预算`);
+      assert.equal(p.timeoutMs, RELAY_TIMEOUT_MS[eff]);
+    }
   }
-  assert.deepEqual(extraBody('glm', false), { reasoning_effort: 'low' });
-  assert.deepEqual(extraBody('glm', true), {});
-  assert.deepEqual(extraBody('custom', false), {});
-  assert.deepEqual(extraBody('moonshot', false), {}, '已下线的服务商不附加字段');
-
-  // 输出预算：请求值先抬到服务商下限，再按档位封顶
-  assert.equal(outputBudget('kimi', 200, false), 200);
-  assert.equal(outputBudget('kimi', 9999, false), 400);
-  assert.equal(outputBudget('kimi', 9999, true), 4000);
-  assert.equal(outputBudget('glm', 200, false), 1000, 'GLM 思考关不掉，给残余思考留余量');
-  assert.equal(outputBudget('glm', 4000, true), 4000);
-  assert.equal(outputBudget('custom', undefined, false), 200);
+  assert.equal(thinkingPlan('glm', 'off', { requested: 200 }).maxTokens, 1000, 'GLM 残余思考留余量');
+  assert.equal(thinkingPlan('kimi', 'off', { requested: 99999 }).maxTokens, 1200, '答案预算封顶');
+  assert.equal(thinkingPlan('kimi', 'bogus').level, 'low', '不认识的档位按默认（低）');
+  // 自定义：控制不了思考，按 key 的「推理模型」勾选
+  assert.deepEqual(thinkingPlan('custom', 'low', { reasoning: false }), { level: 'off', requested: 'low', extra: {}, maxTokens: 200, timeoutMs: 45000 });
+  assert.equal(thinkingPlan('custom', 'off', { reasoning: true, requested: 900 }).maxTokens, 900 + THINK_BUDGET.high);
+  assert.deepEqual(thinkingPlan('moonshot', 'off').extra, {}, '已下线的服务商不附加字段');
 });
 
-test('Kimi K3 测试连接：普通档关思考用 200 token；推理档放开思考并放宽到 4000 token / 90 秒', async () => {
+test('思考档位：测试连接与中转按请求的档位附参数、放宽预算与超时；HY4 降为关，回复里告诉客户端实际档位', async () => {
   const up = fakeUpstream();
   const s = await boot({ upstream: up });
   try {
     const A = await s.guest();
-    for (const [reasoning, wantTokens, wantTimeout] of [[false, 200, 45000], [true, 4000, 90000]]) {
-      const saved = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'kimi', apiKey: SECRET, reasoning } });
-      assert.equal(saved.status, 201);
-      const t = await s.call('POST', `/api/v1/keys/${saved.json.keyId}/test`, { token: A, body: { autonomy: 'blend' } });
+    const k = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'kimi', apiKey: SECRET } });
+    assert.equal(k.status, 201);
+    for (const [lv, extra, tokens, timeout] of [['off', { reasoning_effort: 'low' }, 1000, 45000], ['low', { reasoning_effort: 'high' }, 3900, 75000], ['high', { thinking: { type: 'enabled' } }, 7900, 150000]]) {
+      const t = await s.call('POST', `/api/v1/keys/${k.json.keyId}/test`, { token: A, body: { autonomy: 'blend', thinking: lv } });
       assert.equal(t.status, 200);
       assert.equal(t.json.ok, true, t.json.error);
+      assert.equal(t.json.thinking, lv);
       const c = up.calls.at(-1);
       assert.equal(c.body.model, 'kimi-k3');
-      assert.equal(c.body.max_tokens, wantTokens);
-      assert.equal(c.timeoutMs, wantTimeout);
-      if (reasoning) assert.equal(c.body.thinking, undefined);
-      else assert.deepEqual(c.body.thinking, { type: 'disabled' });
+      for (const [kk, v] of Object.entries(extra)) assert.deepEqual(c.body[kk], v, `${lv}.${kk}`);
+      assert.equal(c.body.max_tokens, tokens, lv);
+      assert.equal(c.timeoutMs, timeout, lv);
     }
-    // GLM：普通档带 reasoning_effort:'low'，输出预算抬到 1000；中转同样适用
-    const g = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'glm', apiKey: SECRET } });
-    await s.call('POST', `/api/v1/keys/${g.json.keyId}/test`, { token: A, body: {} });
-    assert.equal(up.calls.at(-1).body.reasoning_effort, 'low');
-    assert.equal(up.calls.at(-1).body.thinking, undefined);
-    assert.equal(up.calls.at(-1).body.max_tokens, 1000);
-    const relay = await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: g.json.keyId, matchId: mid(7), seat: 0, messages: openingMessages(), max_tokens: 200 } });
+    const h = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'hunyuan', apiKey: SECRET } });
+    const relay = await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: h.json.keyId, matchId: mid(7), seat: 0, messages: openingMessages(), max_tokens: 900, thinking: 'high' } });
     assert.equal(relay.status, 200);
-    assert.equal(up.calls.at(-1).body.max_tokens, 1000);
+    assert.equal(relay.json.thinking, 'off', 'HY4 开思考不实用，降为关');
+    assert.deepEqual(up.calls.at(-1).body.thinking, { type: 'disabled' });
+    assert.equal(up.calls.at(-1).body.max_tokens, 900);
+    // 思考用光预算、答案为空 → 自动用「关」档补问一次
+    let n = 0;
+    up.set((b) => {
+      n++;
+      if (n === 1) return { status: 200, text: JSON.stringify({ model: b.model, choices: [{ message: { content: '', reasoning_content: '想啊想' }, finish_reason: 'length' }], usage: { prompt_tokens: 900, completion_tokens: 3900 } }) };
+      return okReply(b);
+    });
+    const fb = await s.call('POST', `/api/v1/keys/${k.json.keyId}/test`, { token: A, body: { autonomy: 'blend', thinking: 'low' } });
+    assert.equal(fb.json.ok, true, fb.json.error);
+    assert.equal(fb.json.thinking, 'off');
+    assert.match(fb.json.fallback, /补问/);
+    assert.equal(n, 2);
+    assert.deepEqual(up.calls.at(-1).body.reasoning_effort, 'low', 'Kimi 的「关」= effort low');
+    assert.equal(up.calls.at(-2).body.reasoning_effort, 'high', '第一次是「低」档');
+    // 思考过程（reasoning_content）随回复带回，给复盘看
+    up.set((b) => ({ status: 200, text: JSON.stringify({ model: b.model, choices: [{ message: { content: planFromBody(b), reasoning_content: '先看 lead…' }, finish_reason: 'stop' }], usage: { prompt_tokens: 900, completion_tokens: 300, completion_tokens_details: { reasoning_tokens: 250 } } }) }));
+    const r2 = await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: k.json.keyId, matchId: mid(7), seat: 0, kind: 'memory', messages: openingMessages(), max_tokens: 900, thinking: 'low' } });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.reasoning, '先看 lead…');
+    assert.equal(r2.json.usage.reasoning, 250);
+  } finally {
+    await s.close();
+  }
+});
+
+test('网关间歇性 400（rejected by an internal MaaS component）：自动重试一次；仍失败按 5xx（不熔断）；其他 400 照旧是配置错误', async () => {
+  const flaky = 'The request is invalid: the request was rejected by an internal MaaS component.';
+  const seq = (list) => {
+    let k = 0;
+    const fn = async () => list[Math.min(k++, list.length - 1)];
+    fn.count = () => k;
+    return fn;
+  };
+  const ok = { status: 200, text: JSON.stringify({ model: 'kimi-k3', choices: [{ message: { content: '{}' }, finish_reason: 'stop' }], usage: {} }) };
+  const bad400 = { status: 400, text: JSON.stringify({ error: { message: flaky } }) };
+  const base = { base: 'https://x.example/v1', model: 'kimi-k3', apiKey: 'k', messages: [{ role: 'user', content: 'x' }], maxTokens: 10, temperature: 0, timeoutMs: 1000, retryDelayMs: 0 };
+  const up1 = seq([bad400, ok]);
+  assert.equal((await chatCompletion({ ...base, upstream: up1 })).ok, true);
+  assert.equal(up1.count(), 2);
+  const up2 = seq([bad400, bad400, ok]);
+  const r2 = await chatCompletion({ ...base, upstream: up2 });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.kind, '5xx');
+  assert.equal(up2.count(), 2, '只重试一次');
+  const up3 = seq([{ status: 400, text: '{"error":{"message":"model not found"}}' }, ok]);
+  const r3 = await chatCompletion({ ...base, upstream: up3 });
+  assert.equal(r3.kind, 'bad');
+  assert.equal(up3.count(), 1, '真正的配置错误不重试');
+});
+
+test('跨局经验接口：本人存取 / 列表 / 清空；超长 413；别人看不到', async () => {
+  const s = await boot();
+  try {
+    const A = await s.guest();
+    const B = await s.guest();
+    const scope = 'kimi/kimi-k3';
+    assert.equal((await s.call('GET', `/api/v1/memory?scope=${encodeURIComponent(scope)}`, { token: A })).json.item, null);
+    const put = await s.call('PUT', '/api/v1/memory', { token: A, body: { scope, text: '- lead ≤ -2 的宝石不要去', games: 1 } });
+    assert.equal(put.status, 200, put.text);
+    assert.equal(put.json.item.games, 1);
+    const one = await s.call('GET', `/api/v1/memory?scope=${encodeURIComponent(scope)}`, { token: A });
+    assert.equal(one.json.item.text, '- lead ≤ -2 的宝石不要去');
+    assert.equal((await s.call('GET', '/api/v1/memory', { token: A })).json.items.length, 1);
+    assert.equal((await s.call('GET', `/api/v1/memory?scope=${encodeURIComponent(scope)}`, { token: B })).json.item, null, '别人看不到');
+    const long = await s.call('PUT', '/api/v1/memory', { token: A, body: { scope, text: '字'.repeat(BCFG.ai.harness.memoryMaxChars + 1) } });
+    assert.equal(long.status, 413);
+    assert.equal((await s.call('PUT', '/api/v1/memory', { token: A, body: { scope: '../etc', text: 'x' } })).status, 400);
+    assert.equal((await s.call('DELETE', `/api/v1/memory?scope=${encodeURIComponent(scope)}`, { token: A })).status, 204);
+    assert.equal((await s.call('GET', '/api/v1/memory', { token: A })).json.items.length, 0);
   } finally {
     await s.close();
   }
@@ -412,7 +488,7 @@ test('M1 HTTP：预设 → 存 key（不回显）→ 测试连接（示范决策
     assert.equal((await relay(A, { matchId: undefined })).status, 400);
     assert.equal((await relay(A, { seat: 7 })).status, 400);
     assert.equal((await relay(A, { messages: [{ role: 'tool', content: 'x' }] })).status, 400);
-    assert.equal((await relay(A, { messages: [{ role: 'user', content: 'x'.repeat(40000) }] })).status, 413);
+    assert.equal((await relay(A, { messages: [{ role: 'user', content: 'x'.repeat(50000) }] })).status, 413);
     assert.equal((await relay(A, { keyId: 'k_nope' })).status, 404);
 
     // 上游错误分类（客户端据此重试 / 熔断）

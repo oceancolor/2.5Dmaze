@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_CONFIG, makeConfig } from '../src/config/default.config.js';
 import { matchOverrides } from '../src/config/map-sizes.js';
 import { VISION_IDS, visionIdOf, visionOverrides } from '../src/config/vision-modes.js';
+import { spec01Config } from '../src/config/legacy.js';
 import { configHash } from '../src/core/hash.js';
 import { createMatch } from '../src/core/state.js';
 import { observe } from '../src/core/observe.js';
@@ -21,10 +22,13 @@ const play = (cfg, seed, onTurn) => {
   return s;
 };
 
-test('配置：现行规则覆盖为空、哈希不变；四种规则哈希互不相同；预设能反查', () => {
-  assert.deepEqual(visionOverrides('radius'), {});
-  assert.equal(configHash(makeConfig(matchOverrides('manual', 'XL', 'radius'))), configHash(DEFAULT_CONFIG));
-  assert.equal(configHash(DEFAULT_CONFIG), '7e19e5c6');
+test('配置（批次 6）：默认就是全公开；旧 radius 规则的哈希与批次 6 之前逐字节一致（旧记录照常校验）；四种规则哈希互不相同', () => {
+  assert.equal(DEFAULT_CONFIG.vision.mode, 'full');
+  assert.deepEqual(visionOverrides('full'), {});
+  assert.equal(configHash(spec01Config('manual', 'XL', 'radius')), '7e19e5c6', '批次 6 之前 XL 手打的默认哈希（冻结快照）');
+  assert.equal(configHash(spec01Config('script', 'XS', 'full')), '090728bb', '批次 2 实验里 XS 全公开的哈希');
+  assert.notEqual(configHash(DEFAULT_CONFIG), '7e19e5c6');
+  assert.equal(DEFAULT_CONFIG.rulesVersion, 'SPEC-0.2');
   const hs = new Set(VISION_IDS.map((v) => configHash(cfgOf(v))));
   assert.equal(hs.size, 4);
   for (const v of VISION_IDS) assert.equal(visionIdOf(cfgOf(v)), v);
@@ -32,11 +36,16 @@ test('配置：现行规则覆盖为空、哈希不变；四种规则哈希互�
   assert.throws(() => makeConfig({ vision: { mode: 'delayed' } }), /delayTurns/);
 });
 
-test('radius：与引入视野规则前完全一致（同一局记录逐字节相同，状态里没有 trail）', () => {
-  const a = play(cfgOf('radius'), 'v-1');
-  const b = play(makeConfig(matchOverrides('script', 'M')), 'v-1');
-  assert.equal(a.toJSONL(), b.toJSONL());
+test('旧 radius 规则：状态里没有 trail；视野外不给实时位置', () => {
+  const cfg = cfgOf('radius');
+  let hidden = 0;
+  const a = play(cfg, 'v-1', (s) => {
+    const st = s.state;
+    if (st.ended || st.actors[0].status !== 'active') return;
+    for (const o of observe(s.map, st, 0, cfg, { patch: false }).actors) if (o.status === 'active' && !o.visible) hidden++;
+  });
   assert.equal('trail' in a.state, false);
+  assert.ok(hidden > 0);
 });
 
 test('full：所有在场对手每回合都实时可见', () => {
@@ -94,13 +103,17 @@ test('radar：每 K 回合末全员位置广播；之间视野外的最后已知
   assert.ok(worst > 0 && worst <= K, `最旧 ${worst}`);
 });
 
-test('服务器：四种规则 × 规格的记录都 verified，并识别出规则', () => {
+test('服务器：新版（全公开）与 SPEC-0.1 四种规则的记录都 verified，并识别出规则版本与视野', () => {
+  const now = verifyRecord(play(cfgOf('full', 'S'), 'srv-now').toJSONL());
+  assert.equal(now.verify, 'verified', now.verifyNote);
+  assert.equal(now.vision, 'full');
+  assert.equal(now.meta.rulesVersion, 'SPEC-0.2');
   for (const v of VISION_IDS) {
-    const s = play(cfgOf(v, 'S'), `srv-${v}`);
-    const r = verifyRecord(s.toJSONL());
+    const r = verifyRecord(play(spec01Config('script', 'S', v), `srv-${v}`).toJSONL());
     assert.equal(r.verify, 'verified', `${v}: ${r.verifyNote}`);
     assert.equal(r.vision, v);
     assert.equal(r.mapSize, 'S');
+    assert.equal(r.meta.rulesVersion, 'SPEC-0.1');
   }
 });
 

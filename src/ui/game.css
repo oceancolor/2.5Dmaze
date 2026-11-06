@@ -122,6 +122,15 @@ code { font: 12px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace; backgr
 .glass .chip.bad { color: #FFA3B0; }
 .glass .chip.warn { color: #FFE38F; }
 .glass .gems .sets, .glass .think { text-shadow: none; }
+/* 「你的 AI / Agent」面板（批次 4）：状态文字、警示灯、日志行换成深色透明底上看得清的配色；按钮保持实心 */
+.glass .ok { color: #9BEBB3; }
+.glass .warn { color: #FFE38F; }
+.glass .bad { color: #FFA3B0; }
+.glass .lamp.warn { background: rgba(242, 206, 59, .22); color: #FFE38F; }
+.glass .lamp.bad { background: rgba(232, 56, 79, .24); color: #FFB3BD; }
+.glass .console li { background: var(--glass-bg); border-color: var(--glass-border); color: var(--glass-text); text-shadow: var(--glass-shadow); box-shadow: none; }
+.glass .console li.err { border-color: var(--bad); color: #FFC9CF; }
+.glass .btn { text-shadow: none; }
 
 /* ---------- 深色铭牌 ---------- */
 .plate {
@@ -324,6 +333,20 @@ textarea.persona { font: 13.5px/1.6 var(--font); color: var(--text); background:
 .hist th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .06em; border-bottom: 2px solid var(--ink); padding: 3px 6px; }
 .hist td { padding: 5px 6px; border-bottom: 1px solid rgba(126, 102, 56, .3); font-variant-numeric: tabular-nums; }
 .endcard .sync { margin-top: 4px; min-height: 16px; }
+/* 决策复盘时间线 / 经验（批次 6 harness） */
+.endcard .timeline { margin: 8px 0 4px; }
+.endcard .timeline > summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.endcard .tlwrap { max-height: 34vh; overflow: auto; border: 1px solid rgba(126, 102, 56, .3); border-radius: 5px; margin-top: 4px; }
+.endcard table.tl { margin: 0; font-size: 12px; }
+.endcard table.tl td { padding: 4px 6px; vertical-align: top; }
+.endcard table.tl tr.worst td { background: rgba(232, 56, 79, .12); }
+.endcard table.tl td.ok { color: #2f7d46; }
+.endcard table.tl td.bad { color: #b3263a; }
+.endcard table.tl td.warn { color: #8a5a00; }
+.endcard .think summary { cursor: pointer; font-size: 11px; color: var(--muted); }
+.endcard .think pre, .endcard .memtext pre { white-space: pre-wrap; max-height: 220px; overflow: auto; font-size: 11.5px; background: rgba(255, 252, 245, .6); padding: 6px 8px; border-radius: 4px; margin: 4px 0; }
+.endcard .memline { min-height: 16px; }
+.endcard .memtext > summary { cursor: pointer; font-size: 12px; }
 /* 模式 B：接入我的大模型（05 §7） */
 .setup h4 { font: 700 12.5px var(--font); color: var(--ink); margin: 6px 0 0; letter-spacing: .06em; }
 .keys { display: flex; flex-direction: column; gap: 6px; }
@@ -357,6 +380,8 @@ textarea.persona { font: 13.5px/1.6 var(--font); color: var(--text); background:
 .evalout p { margin: 4px 0; }
 .evalout p.warn { color: #8a5a00; }
 .evalout ul { margin: 4px 0 4px 18px; padding: 0; }
+.modes.sizes.think3 { grid-template-columns: repeat(3, 1fr); }
+pre.prompt { white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; font-size: 11.5px; background: rgba(255, 252, 245, .6); padding: 6px 8px; border-radius: 4px; margin: 2px 0 6px; }
 .api pre { font: 11.5px/1.5 ui-monospace, Consolas, monospace; background: rgba(43, 38, 32, .07); padding: 8px 10px; border-radius: 5px; white-space: pre-wrap; margin: 6px 0 0; }
 .chips .chip { font-size: 12px; padding: 4px 9px 5px; }
 .opps { display: flex; flex-direction: column; gap: 8px; }

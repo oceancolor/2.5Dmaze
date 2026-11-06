@@ -71,25 +71,37 @@ function upstreamMessage(text) {
  * @returns {Promise<{ok:true, text:string, usage:{in:number,out:number}, model:string, ms:number, finish:string|null}
  *                 | {ok:false, kind:string, status:number|null, message:string, ms:number}>}
  */
-export async function chatCompletion({ base, model, apiKey, messages, maxTokens, temperature, extra = {}, timeoutMs, upstream = httpsUpstream, now = Date.now }) {
+/**
+ * 网关的间歇性拒绝（2026-11-06 实测：Kimi K3 同一个合法请求约 1/4 回 400「rejected by an internal MaaS component」，
+ * 重发就过）。这种 400 不是配置错误，按临时错误处理：自动重试 retries 次，仍失败记为 5xx（不立即熔断）。
+ */
+const TRANSIENT_400 = /rejected by an internal MaaS component/i;
+
+export async function chatCompletion({ base, model, apiKey, messages, maxTokens, temperature, extra = {}, timeoutMs, upstream = httpsUpstream, now = Date.now, retries = 1, retryDelayMs = 400 }) {
   const t0 = now();
   const ms = () => Math.max(0, Math.round(now() - t0));
   let r;
-  try {
-    r = await upstream({
-      url: `${base}/chat/completions`,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-      body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature, stream: false, ...extra }),
-      timeoutMs,
-    });
-  } catch (e) {
-    const code = e && e.code;
-    if (code === 'ESSRF') return { ok: false, kind: 'blocked', status: null, message: e.message, ms: ms() };
-    if (code === 'EUPSTREAMTIMEOUT') return { ok: false, kind: 'timeout', status: null, message: `上游 ${timeoutMs / 1000} 秒没有回复`, ms: ms() };
-    return { ok: false, kind: 'unreachable', status: null, message: `连不上服务商（${code || (e && e.message) || '网络错误'}）`, ms: ms() };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      r = await upstream({
+        url: `${base}/chat/completions`,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature, stream: false, ...extra }),
+        timeoutMs,
+      });
+    } catch (e) {
+      const code = e && e.code;
+      if (code === 'ESSRF') return { ok: false, kind: 'blocked', status: null, message: e.message, ms: ms() };
+      if (code === 'EUPSTREAMTIMEOUT') return { ok: false, kind: 'timeout', status: null, message: `上游 ${timeoutMs / 1000} 秒没有回复`, ms: ms() };
+      return { ok: false, kind: 'unreachable', status: null, message: `连不上服务商（${code || (e && e.message) || '网络错误'}）`, ms: ms() };
+    }
+    const transient = r.status === 400 && TRANSIENT_400.test(r.text);
+    if (!transient || attempt >= retries) break;
+    if (retryDelayMs) await new Promise((res) => setTimeout(res, retryDelayMs));
   }
   if (r.status < 200 || r.status >= 300) {
-    return { ok: false, kind: errKind(r.status), status: r.status, message: `服务商返回 ${r.status}：${upstreamMessage(r.text)}`, ms: ms() };
+    const kind = r.status === 400 && TRANSIENT_400.test(r.text) ? '5xx' : errKind(r.status);
+    return { ok: false, kind, status: r.status, message: `服务商返回 ${r.status}：${upstreamMessage(r.text)}`, ms: ms() };
   }
   let j;
   try {
@@ -100,12 +112,16 @@ export async function chatCompletion({ base, model, apiKey, messages, maxTokens,
   const c = j && Array.isArray(j.choices) ? j.choices[0] : null;
   const text = c && c.message && typeof c.message.content === 'string' ? c.message.content : '';
   const u = j.usage || {};
+  // 思考过程（reasoning_content，批次 6）：给玩家复盘看，截到 8000 字；思考 token 数单独记
+  const rc = c && c.message && typeof c.message.reasoning_content === 'string' ? c.message.reasoning_content : '';
+  const rt = u.completion_tokens_details && Number(u.completion_tokens_details.reasoning_tokens);
   return {
     ok: true,
     text,
-    usage: { in: Number(u.prompt_tokens) || 0, out: Number(u.completion_tokens) || 0 },
+    usage: { in: Number(u.prompt_tokens) || 0, out: Number(u.completion_tokens) || 0, ...(rt ? { reasoning: rt } : {}) },
     model: typeof j.model === 'string' ? j.model.slice(0, 80) : model,
     finish: c && c.finish_reason ? String(c.finish_reason) : null,
     ms: ms(),
+    ...(rc ? { reasoning: rc.slice(0, 8000) } : {}),
   };
 }

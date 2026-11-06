@@ -1,6 +1,7 @@
 // 对战数据存储（06 §6.1）：Node 内置 SQLite（node:sqlite，Node ≥ 22.13）。
 // 存储层与路由隔离：日后换 Postgres 只需重写本文件。
-// 迁移按 PRAGMA user_version 递增：v1 = S0（账号 / 对局 / 记录 / 座位），v2 = M1（key / 用量 / 思路 / 座位遵循统计 / 对局报告）。
+// 迁移按 PRAGMA user_version 递增：v1 = S0（账号 / 对局 / 记录 / 座位），v2 = M1（key / 用量 / 思路 / 座位遵循统计 / 对局报告），
+// v3 地图规格，v4 视野规则，v5 跨局经验（memories）。
 
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -127,6 +128,15 @@ const MIGRATIONS = [
   // v4 视野规则（radius / full / delayed / radar，2026-11-06 实验）：此前只有现行规则，旧行一律回填 radius
   `ALTER TABLE matches ADD COLUMN vision TEXT;
    UPDATE matches SET vision = 'radius';`,
+  // v5 跨局经验（批次 6 harness）：每人每个模型一份，赛后由模型自己写 / 压缩，玩家可查看 / 编辑 / 清空
+  `CREATE TABLE memories (
+     user_id    TEXT NOT NULL REFERENCES users(id),
+     scope      TEXT NOT NULL,
+     text       TEXT NOT NULL,
+     games      INTEGER NOT NULL DEFAULT 0,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (user_id, scope)
+   );`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -197,6 +207,11 @@ export async function openStore(path = ':memory:') {
     strategiesOf: db.prepare('SELECT seat, autonomy, safety_gate, text FROM strategies WHERE match_id = ? ORDER BY seat'),
     listByUser: db.prepare('SELECT * FROM matches WHERE user_id = ? AND received_at < ? ORDER BY received_at DESC, id DESC LIMIT ?'),
     countByUser: db.prepare('SELECT COUNT(*) AS n FROM matches WHERE user_id = ?'),
+    memoryOf: db.prepare('SELECT scope, text, games, updated_at FROM memories WHERE user_id = ? AND scope = ?'),
+    memoriesOf: db.prepare('SELECT scope, LENGTH(text) AS chars, games, updated_at FROM memories WHERE user_id = ? ORDER BY updated_at DESC'),
+    putMemory: db.prepare(`INSERT INTO memories (user_id, scope, text, games, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, scope) DO UPDATE SET text = excluded.text, games = excluded.games, updated_at = excluded.updated_at`),
+    deleteMemory: db.prepare('DELETE FROM memories WHERE user_id = ? AND scope = ?'),
     recordById: db.prepare('SELECT jsonl_gz FROM match_records WHERE match_id = ?'),
     insertKey: db.prepare(`INSERT INTO keys (id, user_id, provider, base_url, model, reasoning, enc_key, iv, hint, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`),
@@ -318,6 +333,21 @@ export async function openStore(path = ':memory:') {
     },
     usageByMatch(userId, matchId) {
       return q.usageByMatch.all(userId, matchId).map((r) => ({ seat: r.seat, provider: r.provider, model: r.model, calls: r.calls, tokensIn: r.tin, tokensOut: r.tout }));
+    },
+
+    // ── 跨局经验（scope = 服务商/模型）──
+    getMemory(userId, scope) {
+      const r = q.memoryOf.get(userId, scope);
+      return r ? { scope: r.scope, text: r.text, games: r.games, updatedAt: r.updated_at } : null;
+    },
+    listMemories(userId) {
+      return q.memoriesOf.all(userId).map((r) => ({ scope: r.scope, chars: r.chars, games: r.games, updatedAt: r.updated_at }));
+    },
+    putMemory(userId, scope, text, games, at) {
+      q.putMemory.run(userId, scope, text, games, at);
+    },
+    deleteMemory(userId, scope) {
+      return q.deleteMemory.run(userId, scope).changes > 0;
     },
     close() {
       db.close();

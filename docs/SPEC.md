@@ -1,6 +1,7 @@
 # 迷宫寻宝博弈 · 实现规格（SPEC）
 
-> 版本 **SPEC-0.1** · 2026-10-25（同日阶段 1 实现后回填：标定值、随机流、记录格式、启发式让行、基线数据，见附录 B）
+> 版本 **SPEC-0.2** · 2026-11-06（批次 6：对手位置全公开；接入大模型改为 harness —— 博弈事实表、本局会话、跨局经验、目标队列 / 放弃条件、思考档位，见 §6.1、§7.7 与 docs/05 §7.6–§7.9）
+> SPEC-0.1 · 2026-10-25（同日阶段 1 实现后回填：标定值、随机流、记录格式、启发式让行、基线数据，见附录 B）；其配置冻结在 `src/config/legacy.js`，旧记录照常校验
 >
 > **本文件是实现的唯一依据。** `docs/00`–`docs/04` 自本日起**冻结**为参考依据，不再修改；与本文件冲突时一律以本文件为准。
 > 本文件没覆盖的细节：回查旧文档 → 把结论**补回本文件** → 再实现。不直接引用旧文档里的数值（旧文档大量修订层叠，残留旧值很多）。
@@ -219,13 +220,18 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 | 地形 | 全公开 | 【沿用】 |
 | 宝石 / 宝箱位置、当前代数、剩余重生次数、宝箱是否在场 | 全公开 | 【沿用】 |
 | 四人的分数、体力、**各色持有数与成套数** | 全公开。拾取事件全局广播：谁、什么颜色、在哪格 | 【实现】成套计分让各色持有数成为关键博弈信息 |
-| 对手实时位置 | 只在切比雪夫 **R = 9**（19×19）内可见。视野外给「最后目击位置 + 已过回合数」，永不清除；拾取广播也会刷新最后目击位置 | 【沿用】＋【实现】。**2026-11-06 起视野规则可配置（实验，默认仍是这一条）**：`full` 全公开 / `delayed` 视野外给 D 回合前的位置 / `radar` 每 K 回合广播，见下方「视野规则」与附录 C |
+| 对手实时位置 | **全公开**：所有在场对手的实时位置每回合都给（意图 / 目标不公开）。R = 9 不再是视野，只作「近身范围」（启发式让行、大模型「对手接近」事件） | 【定】2026-11-06 批次 6（用户裁定：彻底去掉可见范围机制，更有博弈性）。SPEC-0.1 的旧规则（视野 R = 9 + 最后目击）只留给服务器校验旧记录，见下方 |
 | 宝箱开出结果 | 开出瞬间公示 | 【沿用】 |
 | 四个出生点、四个出口 | 全公开（脚本 `ctx.spawns / ctx.exits`；大模型局面 `rivals[].exit`） | 【实现】2026-11-03 |
 | 上一回合的全场事件（拾取 / 开箱结果 / 到达 / 出局 / 刷新） | 全公开，观察里 `obs.events`（`publicEvents()`）；撞墙 / 受阻只给自己。不进状态，不影响状态哈希 | 【实现】2026-11-03 |
 | 各座位用的是什么模式 | 不给脚本 / 大模型；只有手打的人能从界面名牌看到 | 【定】2026-11-03 |
 
-**视野规则（2026-11-06 实验）**：`cfg.vision.mode`，预设在 `src/config/vision-modes.js`，设置页「视野规则」、`?vision=`、`maze-eval --vision` 都能选。默认 `radius`，覆盖为空，所以配置哈希和旧记录都不变。
+**视野规则（2026-11-06 批次 6 定稿）**：唯一的对局规则是 `full`（全公开），直接写进默认配置（`vision.mode = 'full'`），规则版本升为 **SPEC-0.2**。设置页不再提供视野选项。
+
+- **旧记录照常校验**：SPEC-0.1 的整份默认配置冻结在 `src/config/legacy.js`（逐字照抄，不再修改），服务器白名单 = 当前版本（通道 × 规格）+ SPEC-0.1（通道 × 规格 × 当时的四种视野规则），共用 `src/config/known.js`。记录按自己的 `rulesVersion` 找配置，`configHash` 必须对得上。
+- 旧规则（radius / delayed / radar）的代码保留在内核里，只为回放旧记录与 `tools/vision-experiment.mjs` 复现附录 C 的实验。
+
+以下是 SPEC-0.1 时代的四种规则（实验时的说明，保留作记录）：
 
 | 规则 | 视野内（≤ R） | 视野外 | 状态里多了什么 |
 |---|---|---|---|
@@ -313,11 +319,22 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 | L2 | 超时 / JSON 不可解析 | repair 1 次（≤150 token），再失败转 L1 |
 | L3 | 代理不可达 / 连续 3 次 5xx / 429 持续 | 本局全体改用启发式，HUD 提示 |
 
+### 7.7 玩家自己的大模型：harness 【定】2026-11-06 批次 6
+
+玩家座位接自己的模型时（05 模式 B），规划器按「agent harness」管理：一局一个会话，跨局有长期记忆。对手 AI（模拟 / 本地代理）不变。完整设计见 05 §7.6–§7.9，要点：
+
+- **博弈事实表**（`codec.buildPayload`）：所有算术由引擎算好。每颗宝石 / 宝箱 `race[]` = 每个在场对手的 `dist`（他到这里）、`back`（这里到他出口）、`canReturn`（拿了还回得了家）、`needsColor`（是不是他凑套最缺的颜色），`lead` = 最近一个拿得起的对手步数 − 我的步数。每个对手 `distToExit`、`spare`（体力 − 到出口距离）、`heading`（近 6 回合在靠近的目标，最多 2 个）。
+- **本局会话**（`harness.sessionText`）：每次请求的 user 消息前面带「本局到目前为止」：最近 8 条决策原样（触发、目标、理由 → 结局：拿到 / 被谁抢先几步、白跑几步 / 主动放弃 / 改主意 / 闸门 / 作废），更早的折成一行摘要；再加模型上次留给自己的 `memo`（≤ 300 字）。
+- **决策契约 v2**：在 v1（`follow` / `deviation`）之上可选 `then`（≤ 2 个后续目标，拿到当前目标后引擎直接接着走，记 plan 行 `src: 'queue'`）、`abandonIf.rivalLeadBy`（有拿得起的对手比我近 ≥ k 步就放弃，引擎每回合检查，触发记 `src: 'abandon'` 并同回合重问，`why: 'abandon'`）、`memo`。写错的可选字段丢掉，不判整条不合格。自保闸门第一次改写某个计划时记 `src: 'guard'`。`queue` / `abandon` / `guard` 不算「一次决策」。
+- **跨局经验**：每人每个模型（`服务商/模型`）一份，≤ 2000 字，存服务器（`memories` 表，迁移 v5；`/api/v1/memory`）。开局植入 system 提示词的一段；赛后由模型根据本局复盘自己整份重写（目标 1200 字），超长时让模型压缩。玩家可查看、编辑、清空、关掉。记录 `meta.players[].memoryHash` 只存哈希。
+- **思考档位** `off / low / high`，默认 `low`，按服务商查表（`server/providers.mjs`，2026-11-06 真凭证实测）：HY4 只能关；Kimi K3、GLM 关不掉（「关」= `reasoning_effort: low`）。思考 token 另给预算（低 +3000、高 +7000），超时 45 / 75 / 150 秒。思考用光预算、答案为空时服务器自动用「关」档补问一次。记录 `meta.players[].thinking`。
+- **确定性**：会话、动向历史、队列、放弃条件都只由观察与已生效的计划推出；记录照常严格回放。复盘时间线 `harness.timelineFromRecord` 由记录重放得到，与对局中给模型看的会话逐条一致（测试断言）。
+
 ---
 
 ## 8. 兜底启发式 AI 【实现】阶段 1 用仿真定参
 
-输入是同一份观察，**不全知**：对手位置同样受 R = 9 限制。每回合按下面顺序决策：
+输入是同一份观察（批次 6 起对手位置全公开）。启发式只把近身范围（R = 9）内的对手当障碍。每回合按下面顺序决策：
 
 1. **回家**：`s*10 ≤ d_exit*13` → 进入 HOME。体力回到阈值以上时（例如开箱后）退出 HOME。（修正旧 lib「一旦回家不可逆」的问题。）
 2. **候选**：在场宝石 + 宝箱。可负担条件：`s ≥ d(me,t) + ceil(1.3 × d(t,exit))`，即回程留 30% 余量（取旧 bench-match 口径）。
@@ -478,7 +495,7 @@ tests/     *.test.mjs（node --test）
 
 ```js
 {
-  rulesVersion: 'SPEC-0.1',
+  rulesVersion: 'SPEC-0.2',   // 2026-11-06 批次 6；SPEC-0.1 整份冻结在 src/config/legacy.js
   match:    { playerSeat: 0, playerMode: 'manual' },          // manual | prompt | script | byok（§9.4 B）
   maze: {
     size: 128, wallDensityTarget: 0.355, wallDensityTol: 0.008,
@@ -505,7 +522,9 @@ tests/     *.test.mjs（node --test）
              respawnTurns: 60, respawnMax: 2, respawnMinActorDist: 30 },
   },
   vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true,
-            mode: undefined, delayTurns: undefined, radarEvery: undefined },  // 视野规则（§6.1）；缺省 undefined = radius，哈希不变
+            mode: 'full', delayTurns: undefined, radarEvery: undefined },  // 批次 6 起全公开（§6.1）；R 只作近身范围
+  // ai.llm 新增 contractMaxTokens: 900（契约 v2 的答案预算）；byokTimeoutMs 改为按思考档位 { off: 40000, low: 70000, high: 145000 }
+  // ai.harness: { journalWindow: 8, memoMaxChars: 300, thenMax: 2, trendTurns: 6, memoryMaxChars: 2000, memoryTargetChars: 1200 }（§7.7）
   ai: {
     homeFactorX10: 13,                                         // 终盘区 / 回家阈值：s*10 ≤ d*13
     replanInterval: 8, replanIntervalMax: 10, replanIntervalEndgame: 6,

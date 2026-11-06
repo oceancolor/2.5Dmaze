@@ -22,8 +22,10 @@ export function talkEntry(i) {
     model: i.model ?? null,
     finish: i.finish ?? null,
     usage: i.usage ?? null,
+    thinking: i.thinking ?? null,
     messages: i.messages ?? [],
     reply: i.ok ? i.text ?? '' : null,
+    ...(i.reasoning ? { reasoning: i.reasoning } : {}),
     error: i.ok ? null : i.error ?? null,
   };
 }
@@ -53,8 +55,10 @@ export function talkEntryFromLog(e) {
     model: e.upstreamModel ?? e.model ?? null,
     finish: e.finish ?? null,
     usage: e.usage ?? null,
+    thinking: e.thinking ?? null,
     messages: msgs,
     reply: e.ok ? e.reply ?? '' : null,
+    ...(e.reasoningText ? { reasoning: e.reasoningText } : {}),
     error: e.ok ? null : err,
   };
 }
