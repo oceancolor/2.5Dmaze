@@ -11,7 +11,7 @@ const workerUrl = () => new URL('./eval-worker.js', import.meta.url).href;
  *   seats：{kind:'script', code, name?, author?, origin?} | {kind:'heuristic'} | {kind:'mock', persona}
  * @returns {Promise<{result:object, markdown:string}>}
  */
-export function runEvalInWorker({ size, seeds, seats, baseline = true, worst = 5, onProgress = null, timeoutMs = 180000 }) {
+export function runEvalInWorker({ size, vision, seeds, seats, baseline = true, worst = 5, onProgress = null, timeoutMs = 180000 }) {
   const parts = [`import { __reg, __ready } from ${JSON.stringify(workerUrl())};`];
   const specs = [];
   for (let i = 0; i < seats.length; i++) {
@@ -43,7 +43,7 @@ export function runEvalInWorker({ size, seeds, seats, baseline = true, worst = 5
     };
     w.onmessage = (e) => {
       const m = e.data;
-      if (m.type === 'ready') w.postMessage({ type: 'run', size, seeds, seats: specs, baseline, worst });
+      if (m.type === 'ready') w.postMessage({ type: 'run', size, vision, seeds, seats: specs, baseline, worst });
       else if (m.type === 'progress' && onProgress) onProgress(m.done, m.total);
       else if (m.type === 'done') done(resolve, { result: m.result, markdown: m.markdown });
       else if (m.type === 'error') done(reject, new Error(m.error));

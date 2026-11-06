@@ -11,7 +11,7 @@
 
 import { HttpError, clientIp, createLimiter, selfOrigin, sendError, sendJson } from './http.mjs';
 import { createGuest, getMe } from './api/accounts.mjs';
-import { getMatch, getRecord, listMatches, uploadMatch } from './api/matches.mjs';
+import { getLlmLog, getMatch, getRecord, listMatches, uploadMatch } from './api/matches.mjs';
 import { createKey, deleteKey, getProviders, getUsage, listKeys, relayChat, testKey } from './api/llm.mjs';
 import { createVault } from './vault.mjs';
 import { RULES_VERSION } from './verifier.mjs';
@@ -87,9 +87,10 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
       if (m === 'GET') return listMatches(req, res, ctx);
       throw new HttpError(405, 'method_not_allowed', '只支持 GET / POST');
     }
-    const mm = /^\/api\/v1\/matches\/([^/]+)(\/record)?$/.exec(p);
+    const mm = /^\/api\/v1\/matches\/([^/]+)(\/record|\/llm-log)?$/.exec(p);
     if (mm) {
       if (m !== 'GET') throw new HttpError(405, 'method_not_allowed', '只支持 GET');
+      if (mm[2] === '/llm-log') return getLlmLog(req, res, ctx, mm[1]);
       return mm[2] ? getRecord(req, res, ctx, mm[1]) : getMatch(req, res, ctx, mm[1]);
     }
     if (p === '/api/v1/providers') {

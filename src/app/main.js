@@ -4,6 +4,7 @@
 
 import { makeConfig } from '../config/default.config.js';
 import { matchOverrides, isMapSize } from '../config/map-sizes.js';
+import { isVision } from '../config/vision-modes.js';
 import { normalizeSeed, freshSeed } from '../core/rng.js';
 import { createMatch } from '../core/state.js';
 import { observe } from '../core/observe.js';
@@ -134,6 +135,7 @@ function compareText(mine, base, proxied) {
 function disposeGame() {
   if (!game) return;
   for (const c of game.sched.controllers) if (c && c.dispose) c.dispose();
+  if (game.minimap && game.minimap.dispose) game.minimap.dispose();
   game.offs.forEach((f) => f());
   game = null;
 }
@@ -158,7 +160,7 @@ async function startMatch(setup, { sameSeed = false } = {}) {
     }
     p.keyMeta = { provider: keyMeta.provider, providerLabel: keyMeta.providerLabel, model: keyMeta.model, reasoning: Boolean(keyMeta.reasoning) };
   }
-  const cfg = makeConfig(matchOverrides(p.mode, setup.mapSize));
+  const cfg = makeConfig(matchOverrides(p.mode, setup.mapSize, setup.vision));
   const seed = sameSeed && lastSeed !== null ? lastSeed : setup.seed ? parseSeed(setup.seed) : freshSeed();
   boot.hidden = false;
   boot.textContent = '生成迷宫…';
@@ -414,7 +416,7 @@ function openSetup() {
 const setupUi = createSetup(setupRoot, {
   probe: () => probeProxy(),
   trial: async (code, seedText) => {
-    const cfg = makeConfig(matchOverrides('script', setupUi.setup.mapSize));
+    const cfg = makeConfig(matchOverrides('script', setupUi.setup.mapSize, setupUi.setup.vision));
     const m = createMatch(seedText ? parseSeed(seedText) : 1, cfg);
     return testScript({ code, map: m.map, seat: 0, cfg, seed: m.seed, obs: observe(m.map, m.state, 0, cfg, { patch: false, events: [] }) });
   },
@@ -557,6 +559,7 @@ frameLoop((t, dt) => {
   const q = new URLSearchParams(location.search);
   if (q.get('seed')) setupUi.patch({ seed: q.get('seed') });
   if (isMapSize(q.get('size'))) setupUi.patch({ mapSize: q.get('size') });
+  if (isVision(q.get('vision'))) setupUi.patch({ vision: q.get('vision') });
   if (q.get('mode') && ['manual', 'script', 'byok'].includes(q.get('mode'))) {
     const s = setupUi.setup;
     s.player.mode = q.get('mode');

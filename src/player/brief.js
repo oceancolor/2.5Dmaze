@@ -9,8 +9,9 @@ const OPP_ZH = { heuristic: '启发式', mock: '模拟大模型', proxy: '大模
  * @param {{mapSize:string, size:number, rules:{stamina:number, maxTurns:number, visionRadius:number, gemScore:number, setBonus:number, gemRespawnMax:number},
  *          opponents:{brain:string, label?:string}[], requirement?:string, name?:string}} o
  */
-export function buildBrief({ mapSize, size, rules, opponents = [], requirement = '', name = 'my-bot' }) {
+export function buildBrief({ mapSize, size, rules, opponents = [], requirement = '', name = 'my-bot', vision = 'radius', visionRule = '' }) {
   const opp = opponents.map((o, k) => `座位 ${k + 1}：${o.label || OPP_ZH[o.brain] || o.brain}`).join('；') || '启发式 × 3';
+  const vArg = vision && vision !== 'radius' ? ` --vision ${vision}` : '';
   const seat = (o) => (o.brain === 'mock' ? `mock:${o.persona || 'balanced'}` : 'heuristic');
   const seatArgs = opponents.map((o, k) => (o.brain === 'heuristic' ? '' : ` --seat${k + 1} ${seat(o)}`)).join('');
   const req = String(requirement || '').trim() || '（玩家没有额外要求：在不出局的前提下分数尽量高、名次尽量靠前）';
@@ -22,7 +23,8 @@ export function buildBrief({ mapSize, size, rules, opponents = [], requirement =
 ${req}
 
 ## 对局设置（本次评测按这个来）
-- 地图规格 ${mapSize}（${size}×${size}），体力 ${rules.stamina}，回合上限 ${rules.maxTurns}，视野（切比雪夫距离）${rules.visionRadius}
+- 地图规格 ${mapSize}（${size}×${size}），体力 ${rules.stamina}，回合上限 ${rules.maxTurns}
+- 视野规则：${visionRule || `对手只在切比雪夫距离 ${rules.visionRadius} 内实时可见；视野外只给最后目击位置`}（\`ctx.rules.vision\` 里有规则参数）
 - 对手：${opp}
 - 计分：宝石数 × ${rules.gemScore} + 成套数 × ${rules.setBonus}（五色各一颗为一套）+ 宝箱分；宝石拿空后刷新（最多 ${rules.gemRespawnMax} 次）
 - 只有到达自己的出口才有成绩；体力归零或到回合上限还没到出口就出局、成绩作废
@@ -54,8 +56,8 @@ function decide(obs, api) {}
 ## 怎么评测（请反复跑，直到满意）
 在项目目录：
 \`\`\`
-npm run eval -- --script ${name}.js --size ${mapSize} --seeds 1-50${seatArgs}
-npm run eval -- --script ${name}.js --size ${mapSize} --seeds 1-50 --format json${seatArgs}
+npm run eval -- --script ${name}.js --size ${mapSize}${vArg} --seeds 1-50${seatArgs}
+npm run eval -- --script ${name}.js --size ${mapSize}${vArg} --seeds 1-50 --format json${seatArgs}
 \`\`\`
 输出各座位到达率 / 平均分 / 平均名次、与启发式基线的差、每回合耗时、按正式预算会超时的回合、异常和最差几局（带种子，可单独复现：\`--seeds <种子>\`）。评测默认不打断，同一脚本 + 种子结果可复现。
 建议换几组种子和对手（\`--seat1 mock:bold\` 等）验证没有过拟合，并在其他规格上（\`--size S\` / \`--size XL\`）也跑一下。

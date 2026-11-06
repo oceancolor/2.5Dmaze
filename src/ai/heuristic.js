@@ -72,8 +72,10 @@ export function stepToward(map, obs, target, cfg, st, mem = {}) {
   const tIdx = target.y * N + target.x;
   if (selfIdx === tIdx) return STAY;
 
+  // 只把视野半径内的对手当障碍：现行规则下可见即在半径内（行为不变）；全公开规则下远处的人也 visible，不该影响眼前走位
+  const near = cfg.vision.entityRadius;
   const occupied = new Set();
-  for (const o of obs.actors) if (o.visible) occupied.add(o.y * N + o.x);
+  for (const o of obs.actors) if (o.visible && Math.max(Math.abs(o.x - me.x), Math.abs(o.y - me.y)) <= near) occupied.add(o.y * N + o.x);
 
   const nb = (d) => {
     const x = me.x + DX[d];

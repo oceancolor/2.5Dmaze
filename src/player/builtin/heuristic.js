@@ -67,8 +67,8 @@ function stepToward(obs, api, t) {
   const self = me.y * N + me.x;
   const tIdx = t.y * N + t.x;
   if (self === tIdx) return 'STAY';
-  const occupied = new Set();
-  for (const o of obs.actors) if (o.visible) occupied.add(o.y * N + o.x);
+  const occupied = new Set(); // 只把视野半径内的对手当障碍（全公开规则下远处的人也 visible，不影响眼前走位）
+  for (const o of obs.actors) if (o.visible && Math.max(Math.abs(o.x - me.x), Math.abs(o.y - me.y)) <= R.visionRadius) occupied.add(o.y * N + o.x);
   const nb = (d) => {
     const x = me.x + DX[d];
     const y = me.y + DY[d];

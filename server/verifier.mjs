@@ -7,6 +7,7 @@
 
 import { DEFAULT_CONFIG, makeConfig } from '../src/config/default.config.js';
 import { MAP_SIZE_IDS, matchOverrides } from '../src/config/map-sizes.js';
+import { VISION_IDS } from '../src/config/vision-modes.js';
 import { canonicalJSON, configHash } from '../src/core/hash.js';
 import { rankActors } from '../src/core/scoring.js';
 import { RECORD_VERSIONS } from '../src/record/recorder.js';
@@ -16,11 +17,14 @@ import { HttpError } from './http.mjs';
 export const RULES_VERSION = DEFAULT_CONFIG.rulesVersion;
 const SEATS = DEFAULT_CONFIG.spawns.length;
 
-/** 服务器认可的配置：玩家通道 × 地图规格（configHash 含 match.playerMode 与整份尺寸参数）。XL 与引入规格前同一个哈希。 */
-const KNOWN = new Map(Object.keys(DEFAULT_CONFIG.rules.staminaByMode).flatMap((mode) => MAP_SIZE_IDS.map((mapSize) => {
-  const cfg = makeConfig(matchOverrides(mode, mapSize));
-  return [configHash(cfg), { cfg, mode, mapSize }];
-})));
+/**
+ * 服务器认可的配置：玩家通道 × 地图规格 × 视野规则（configHash 覆盖整份配置）。
+ * 视野规则缺省 radius 时不加覆盖，XL + radius 与引入规格 / 视野规则前同一个哈希，旧记录照常校验。
+ */
+const KNOWN = new Map(Object.keys(DEFAULT_CONFIG.rules.staminaByMode).flatMap((mode) => MAP_SIZE_IDS.flatMap((mapSize) => VISION_IDS.map((vision) => {
+  const cfg = makeConfig(matchOverrides(mode, mapSize, vision));
+  return [configHash(cfg), { cfg, mode, mapSize, vision }];
+}))));
 const MAX_TURNS = Math.max(...[...KNOWN.values()].map((k) => k.cfg.rules.maxTurns));
 const MAX_LINES = MAX_TURNS * 6 + 8;
 
@@ -161,7 +165,7 @@ export function parseRecord(text) {
 export function verifyRecord(text) {
   const { lines, meta, end } = parseRecord(text);
   const plans = lines.filter((l) => l.t === 'plan').length;
-  const base = { meta, ranking: end.ranking, turns: end.n, plans, seatPlans: planStats(lines), playerMode: null, mapSize: null };
+  const base = { meta, ranking: end.ranking, turns: end.n, plans, seatPlans: planStats(lines), playerMode: null, mapSize: null, vision: null };
 
   if (meta.rulesVersion !== RULES_VERSION) {
     return { ...base, verify: 'unverifiable', verifyTurn: null, verifyNote: `规则版本 ${meta.rulesVersion} 不是本服务器的内核版本（${RULES_VERSION}）` };
@@ -172,6 +176,7 @@ export function verifyRecord(text) {
   }
   base.playerMode = known.mode;
   base.mapSize = known.mapSize;
+  base.vision = known.vision;
   let r;
   try {
     r = replay(lines.map((l) => JSON.stringify(l)), known.cfg);

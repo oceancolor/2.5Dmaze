@@ -12,6 +12,7 @@ export const ORIGINS = Object.freeze({ human: '人写', agent: 'agent 写', buil
 
 export const BUILTINS = Object.freeze([
   Object.freeze({ id: 'builtin:heuristic', file: 'heuristic.js', name: '启发式（参考实现）', author: '迷宫寻宝', origin: 'builtin' }),
+  Object.freeze({ id: 'builtin:aware', file: 'aware.js', name: '预判对手（参考实现）', author: '迷宫寻宝', origin: 'builtin' }),
   Object.freeze({ id: 'builtin:sets', file: 'sets.js', name: '凑套 + 推演抢宝石', author: '迷宫寻宝', origin: 'builtin' }),
 ]);
 

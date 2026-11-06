@@ -69,7 +69,7 @@ self.onmessage = (e) => {
   try {
     let lastPost = 0;
     const result = runEval({
-      size: m.size, seeds: m.seeds, seats: m.seats, baseline: m.baseline !== false, worst: m.worst ?? 5, makeScript: makeSync,
+      size: m.size, vision: m.vision, seeds: m.seeds, seats: m.seats, baseline: m.baseline !== false, worst: m.worst ?? 5, makeScript: makeSync,
       onProgress: (done, total) => {
         const t = clock();
         if (t - lastPost > 100 || done === total) {

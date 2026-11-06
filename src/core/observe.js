@@ -3,6 +3,7 @@
 import { DIR_NAMES, cheb } from './geom.js';
 import { fieldFrom } from './nav/bfs.js';
 import { scoreOf, setsOf } from './scoring.js';
+import { sightRadius } from './vision.js';
 
 function publicInfo(a, cfg) {
   return {
@@ -85,7 +86,7 @@ export function observe(map, state, seat, cfg, opts = {}) {
   const N = map.size;
   const A = state.actors;
   const me = A[seat];
-  const R = cfg.vision.entityRadius;
+  const R = sightRadius(cfg);
   const colors = cfg.treasure.gemColors;
   const selfIdx = me.y * N + me.x;
   const [ex, ey] = map.exits[seat];

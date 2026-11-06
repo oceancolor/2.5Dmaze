@@ -73,26 +73,28 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
   end.hidden = true;
   root.append(tl, tr, bl, br, top, bottom, end);
 
-  tl.innerHTML = `${frame(`<div class="score-row">
+  // 不透明面板包一层 .fx 加投影；记分牌 / 宝石区 / 动态广播是半透明面板（.glass，与小地图一致），不加投影
+  const fx = (html) => `<div class="fx">${html}</div>`;
+  tl.innerHTML = `${fx(frame(`<div class="score-row">
       <div><div class="k">分数</div><div class="big" data-k="score">0</div></div>
       <div class="vr"></div>
       <div><div class="k">回合</div><div class="big"><span data-k="turn">1</span><small> / ${cfg.rules.maxTurns}</small></div></div>
-    </div>`)}<ul class="feed"></ul>`;
+    </div>`))}<ul class="feed glass"></ul>`;
   tr.innerHTML = `<div class="plate speed" data-k="speed"></div>
-    ${frame(`<div class="row"><span class="k">体力</span><b class="num" data-k="stamina"></b><span class="sp"></span>
+    ${fx(frame(`<div class="row"><span class="k">体力</span><b class="num" data-k="stamina"></b><span class="sp"></span>
         <span class="home"><i class="hdot" data-k="hdot"></i>回家 <b class="num" data-k="home"></b> 步</span>
         <span class="compass" data-k="compass" title="出口方向"><svg viewBox="-10 -10 20 20" width="22" height="22"><path d="M0-8 L6 6 L0 3 L-6 6Z"/></svg></span></div>
       <div class="bar" data-k="bar"><i></i><i></i><i></i><i></i></div>
-      <div class="note" data-k="note"></div>`, 'stam')}`;
+      <div class="note" data-k="note"></div>`, 'stam'))}`;
   const s0 = seats[0];
   const agentBox = s0 && s0.label !== '手动'
-    ? frame(`<div class="k">${s0.byok ? '你的 AI' : '你的 Agent'} · <b data-k="agentkind">${esc(s0.label)}</b>${s0.byok && s0.persona ? ` · ${esc(s0.persona)}` : ''}</div>
-        <div class="agent" data-k="agent"></div><div class="aictl" data-k="aictl"></div><ol class="console" data-k="console"></ol>`, 'agentbox')
+    ? fx(frame(`<div class="k">${s0.byok ? '你的 AI' : '你的 Agent'} · <b data-k="agentkind">${esc(s0.label)}</b>${s0.byok && s0.persona ? ` · ${esc(s0.persona)}` : ''}</div>
+        <div class="agent" data-k="agent"></div><div class="aictl" data-k="aictl"></div><ol class="console" data-k="console"></ol>`, 'agentbox'))
     : '';
   bl.innerHTML = `${agentBox}${frame(`<div class="k" data-k="gemhead"></div>
       <div class="gems" data-k="gems"></div>
-      <div class="k sub" data-k="chest"></div>`)}`;
-  br.innerHTML = frame('<div class="seats" data-k="seats"></div><div class="k foot" data-k="llm"></div>', 'seatbox');
+      <div class="k sub" data-k="chest"></div>`, 'glass')}`;
+  br.innerHTML = frame('<div class="seats" data-k="seats"></div><div class="k foot" data-k="llm"></div>', 'seatbox glass');
   top.innerHTML = `<div class="toolbar">
       <span class="seg" data-k="speeds"></span>
       <button class="btn" data-a="skip" title="跳过动画（0）">跳过动画</button>

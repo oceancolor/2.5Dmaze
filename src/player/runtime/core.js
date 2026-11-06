@@ -48,6 +48,8 @@ export function buildCtx(map, seat, cfg) {
       stamina: staminaFor(cfg),
       moveCost: cfg.rules.moveCost,
       visionRadius: cfg.vision.entityRadius,
+      // 视野规则（SPEC §6.1）：mode = radius | full | delayed | radar；delayTurns / radarEvery 只在对应规则下有值
+      vision: { mode: cfg.vision.mode ?? 'radius', delayTurns: cfg.vision.delayTurns ?? null, radarEvery: cfg.vision.radarEvery ?? null },
       gemColors: T.gemColors.slice(),
       gemScore: T.gemScore,
       setBonus: T.setBonus,

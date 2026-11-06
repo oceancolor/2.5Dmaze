@@ -8,6 +8,7 @@
 //                  ④ 玩家思路（玩家写，≤ 2000 字）⑤ 局面 + 本次决策的上下文（触发原因 / 当前计划 / 剩余次数）
 
 import { fieldFrom } from '../core/nav/bfs.js';
+import { visionText } from '../config/vision-modes.js';
 
 export const TARGET_TYPES = Object.freeze(['gem', 'chest', 'exit']);
 export const COLOR_ZH = Object.freeze({ red: '红', yellow: '黄', green: '绿', blue: '蓝', purple: '紫' });
@@ -111,7 +112,7 @@ function rulesLines(payload, cfg) {
     `- 方向 N=y−1、E=x+1、S=y+1、W=x−1。只有成功移动扣 1 体力；体力归零出局、分数作废；第 ${payload.maxTurns} 回合仍未到出口也出局。`,
     '- 只有到达自己的出口才算成绩，冠军在到达者中按分数决出。',
     `- 计分 = 宝石数×${T.gemScore} + 成套数×${T.setBonus}（成套 = 五色各一颗）+ 宝箱分。宝箱随机给 ${T.chest.scoreRange.join('–')} 分或 ${T.chest.staminaRange.join('–')} 体力。`,
-    `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。对手只在切比雪夫距离 ${cfg.vision.entityRadius} 内可见，宝石 / 宝箱位置全公开。`,
+    `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。${visionText(cfg)}；宝石 / 宝箱位置全公开。`,
     '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 视野内比你更近的对手座位。',
     '- rivals[].exit 是对手的出口（公开）；events 是上一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新）。',
     '- 务必保证 stamina ≥ dist + back，并留余量；体力只够回家时选 exit。',

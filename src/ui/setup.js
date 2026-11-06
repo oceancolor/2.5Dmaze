@@ -13,6 +13,7 @@ import { buildBrief } from '../player/brief.js';
 import { BUDGET } from '../player/runtime/budget.js';
 import { MAPPINGS } from '../player/input.js';
 import { MAP_SIZES, MAP_SIZE_IDS, DEFAULT_MAP_SIZE, isMapSize, matchOverrides } from '../config/map-sizes.js';
+import { VISION_IDS, VISION_PRESETS, DEFAULT_VISION, isVision, visionText } from '../config/vision-modes.js';
 import { makeConfig } from '../config/default.config.js';
 import { ACTOR_COLORS } from '../render/palette.js';
 import { esc, frame, SEAT_NAMES, tokensText } from './hud.js';
@@ -32,6 +33,7 @@ export function defaultSetup() {
     speed: 2,
     mapping: 'grid',
     mapSize: DEFAULT_MAP_SIZE,
+    vision: DEFAULT_VISION,
     evalRuns: 20,
     player: {
       mode: 'manual', code: SCRIPT_TEMPLATE, persona: PERSONAS.balanced.text, llm: 'mock',
@@ -62,6 +64,7 @@ export function loadSetup() {
     // 「提示词 Agent」已下线（内核仍认 prompt，旧记录照常校验）：存档里的 prompt 改回手打
     if (!MODES.some((m) => m.id === out.player.mode)) out.player.mode = 'manual';
     if (!isMapSize(out.mapSize)) out.mapSize = DEFAULT_MAP_SIZE;
+    if (!isVision(out.vision)) out.vision = DEFAULT_VISION;
     return out;
   } catch {
     return d;
@@ -148,13 +151,17 @@ function historyView(r) {
     return `<span class="k">读取失败：${esc(r.reason)}</span>`;
   }
   if (!r.items.length) return '<span class="k">还没有记录。打完一局会自动上传，服务器用同一个内核逐回合重放校验。</span>';
-  return `<table class="hist"><tr><th>时间</th><th>种子</th><th>回合</th><th>你</th><th>名次 / 分数</th><th>校验</th></tr>${r.items.map((m) => {
+  const anyByok = r.items.some((m) => m.seats[0] && String(m.seats[0].tag).startsWith('byok:'));
+  return `<table class="hist"><tr><th>时间</th><th>种子</th><th>回合</th><th>规格 · 视野</th><th>你</th><th>名次 / 分数</th><th>校验</th>${anyByok ? '<th>AI 对话</th>' : ''}</tr>${r.items.map((m) => {
     const me = m.ranking.find((x) => x.seat === 0) || {};
     const tag = m.seats[0] ? m.seats[0].tag : '';
-    return `<tr><td>${when(m.endedAt || m.receivedAt)}</td><td>${esc(m.seed)}</td><td>${m.turns}</td><td>${esc(channelOf(tag))}</td>
+    // 接大模型模式的对局：从服务器对话日志下载这局的全部请求 / 回复 + 每次决策的结局（2026-11-05 批次 1）
+    const talk = tag.startsWith('byok:') ? `<button class="btn mini" data-a="histtalk" data-id="${esc(m.matchId)}" title="下载这局你的 AI 每次请求 / 回复与结局（JSONL，不含 key）">下载对话</button>` : '';
+    const vis = m.vision && VISION_PRESETS[m.vision] ? VISION_PRESETS[m.vision].label.replace('（现行）', '') : '—';
+    return `<tr><td>${when(m.endedAt || m.receivedAt)}</td><td>${esc(m.seed)}</td><td>${m.turns}</td><td>${esc(m.mapSize || '—')} · ${esc(vis)}</td><td>${esc(channelOf(tag))}</td>
       <td>${me.place ?? '–'} 名 · ${me.score ?? '–'} 分 · ${esc(STATUS[me.status] || me.status || '')}</td>
-      <td title="${esc(m.verifyNote || '')}">${VERIFY[m.verify] || esc(m.verify)}</td></tr>`;
-  }).join('')}</table>${r.total > r.items.length ? `<p class="k">共 ${r.total} 局，显示最近 ${r.items.length} 局</p>` : ''}`;
+      <td title="${esc(m.verifyNote || '')}">${VERIFY[m.verify] || esc(m.verify)}</td>${anyByok ? `<td>${talk}</td>` : ''}</tr>`;
+  }).join('')}</table>${r.total > r.items.length ? `<p class="k">共 ${r.total} 局，显示最近 ${r.items.length} 局</p>` : ''}<p class="k" data-k="histnote"></p>`;
 }
 
 /**
@@ -269,7 +276,7 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
       <div class="k" data-k="libnote">${libNote}</div>
       <details class="evalbox"${evalHtml ? ' open' : ''}><summary>整局试跑（与命令行 <code>npm run eval</code> 同一个评测）</summary>
         <div class="row"><label>局数</label><select data-f="evalruns">${[10, 20, 50].map((n) => opt(String(n), `${n} 局`, String(s.evalRuns))).join('')}</select>
-          <span class="k">规格 ${esc(MAP_SIZES[s.mapSize].label)} · 对手按下面「对手」的设置（本地代理按启发式算）· 种子 1–N · 预算只统计不打断</span>
+          <span class="k">规格 ${esc(MAP_SIZES[s.mapSize].label)} · 视野 ${esc(VISION_PRESETS[s.vision].label)} · 对手按下面「对手」的设置（本地代理按启发式算）· 种子 1–N · 预算只统计不打断</span>
           <span class="sp"></span><button class="btn brass" data-a="evalrun"${evalBusy ? ' disabled' : ''}>${evalBusy ? '试跑中…' : '开始试跑'}</button></div>
         <div class="evalout" data-k="eval">${evalHtml}</div>
       </details>
@@ -319,7 +326,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   }
 
   function briefText() {
-    const cfg = makeConfig(matchOverrides('script', s.mapSize));
+    const cfg = makeConfig(matchOverrides('script', s.mapSize, s.vision));
     const opponents = s.opponents.map((o) => {
       if (o.brain === 'script') {
         const l = scriptLabel(o.scriptId);
@@ -328,7 +335,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       return { brain: o.brain === 'proxy' ? 'heuristic' : o.brain, persona: o.persona, label: o.brain === 'mock' ? `模拟大模型（${PERSONAS[o.persona].label}）` : o.brain === 'proxy' ? '大模型（本地代理，评测时按启发式）' : '启发式' };
     });
     const rules = { stamina: cfg.rules.staminaByMode.script, maxTurns: cfg.rules.maxTurns, visionRadius: cfg.vision.entityRadius, gemScore: cfg.treasure.gemScore, setBonus: cfg.treasure.setBonus, gemRespawnMax: cfg.treasure.gemRespawnMax };
-    return buildBrief({ mapSize: s.mapSize, size: cfg.maze.size, rules, opponents, requirement: s.player.brief, name: 'my-bot' });
+    return buildBrief({ mapSize: s.mapSize, size: cfg.maze.size, rules, opponents, requirement: s.player.brief, name: 'my-bot', vision: s.vision, visionRule: visionText(cfg) });
   }
 
   async function copyText(text) {
@@ -551,6 +558,12 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
           return `<button class="choice${s.mapSize === id ? ' on' : ''}" data-size="${id}"><b>${z.label}</b><span>体力 ${z.stamina} · 上限 ${z.maxTurns} 回合</span></button>`;
         }).join('')}</div>
       </section>
+      <section><h3>视野规则 <small class="k">实验中，默认「视野半径（现行）」</small></h3>
+        <div class="modes sizes vis">${VISION_IDS.map((id) => {
+          const v = VISION_PRESETS[id];
+          return `<button class="choice${s.vision === id ? ' on' : ''}" data-vision="${id}"><b>${esc(v.label)}</b><span>${esc(v.short)}</span></button>`;
+        }).join('')}</div>
+      </section>
       <section><h3>对手</h3>
         <div class="opps">${s.opponents.map((o, k) => {
           const seat = k + 1;
@@ -594,6 +607,11 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
   root.addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (b.dataset.vision && isVision(b.dataset.vision)) {
+      set(() => { s.vision = b.dataset.vision; });
+      root.querySelectorAll('[data-vision]').forEach((x) => x.classList.toggle('on', x === b));
+      return;
+    }
     if (b.dataset.size && isMapSize(b.dataset.size)) {
       set(() => { s.mapSize = b.dataset.size; });
       root.querySelectorAll('[data-size]').forEach((x) => x.classList.toggle('on', x === b));
@@ -648,7 +666,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       try {
         const seats = await evalSeats();
         const { markdown } = await scripts.evaluate({
-          size: s.mapSize, seeds: `1-${s.evalRuns}`, seats,
+          size: s.mapSize, vision: s.vision, seeds: `1-${s.evalRuns}`, seats,
           onProgress: (d, t) => paintK('eval', `<span class="k">试跑中 ${d} / ${t} 局…</span>`),
         });
         evalHtml = mdToHtml(markdown);
@@ -702,6 +720,23 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
         });
         libNote = `已删除「${esc(e.name)}」`;
         render();
+      }
+    } else if (b.dataset.a === 'histtalk' && llm) {
+      const id = b.dataset.id;
+      const note = (html) => paintK('histnote', html);
+      b.disabled = true;
+      note('<span class="k">读取对话日志…</span>');
+      const r = await llm.call('GET', `/api/v1/matches/${encodeURIComponent(id)}/llm-log`);
+      b.disabled = false;
+      if (r.status === 200 && r.json && typeof r.json.jsonl === 'string') {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([r.json.jsonl], { type: 'application/x-ndjson' }));
+        a.download = r.json.filename || `maze-ai-talk-${id}.jsonl`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        note(`<b class="ok">已下载</b> · ${r.json.calls} 次调用 · ${esc(a.download)}`);
+      } else {
+        note(`<b class="bad">下载失败</b> · ${esc(r.status === 0 ? '连不上游戏服务器' : (r.json && r.json.message) || `HTTP ${r.status}`)}`);
       }
     } else if (b.dataset.a === 'history') {
       historyHtml = '<span class="k">读取中…</span>';

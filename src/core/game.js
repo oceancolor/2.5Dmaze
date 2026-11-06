@@ -6,7 +6,7 @@ import { next, randInt } from './rng.js';
 import { arbitrate } from './arbitrate.js';
 import { cloneState } from './state.js';
 import { placeRespawn } from './maze/place.js';
-import { refreshMemory, broadcastPosition } from './vision.js';
+import { refreshVision, broadcastPosition } from './vision.js';
 
 const atOwnExit = (map, a) => a.x === map.exits[a.seat][0] && a.y === map.exits[a.seat][1];
 
@@ -182,7 +182,7 @@ export function step(map, prev, intents, cfg) {
     }
   }
 
-  refreshMemory(s, cfg.vision.entityRadius, turn);
+  refreshVision(s, cfg, turn);
 
   if (A.every((a) => a.status !== 'active')) {
     s.ended = true;

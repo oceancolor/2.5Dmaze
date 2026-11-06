@@ -7,7 +7,7 @@ import { mapHashOf } from './hash.js';
 import { generateGrid } from './maze/generate.js';
 import { analyzeMap } from './maze/validate.js';
 import { buildPool, placeInitial } from './maze/place.js';
-import { refreshMemory } from './vision.js';
+import { initTrail, refreshVision } from './vision.js';
 import { staminaFor } from '../config/default.config.js';
 
 /**
@@ -113,7 +113,8 @@ export function initState(map, items, placeStream, chestStream, cfg) {
     rng: { place: { s: placeStream.s }, chest: { s: chestStream.s } },
     memory: actors.map(() => actors.map(() => null)),
   };
-  refreshMemory(state, cfg.vision.entityRadius, 0);
+  initTrail(state, cfg);
+  refreshVision(state, cfg, 0);
   return state;
 }
 
@@ -129,5 +130,6 @@ export function cloneState(s) {
     chest: { ...s.chest },
     rng: { place: { s: s.rng.place.s }, chest: { s: s.rng.chest.s } },
     memory: s.memory.map((row) => row.map((m) => (m ? m.slice() : null))),
+    ...(s.trail ? { trail: s.trail.map((t) => t.map((p) => p.slice())) } : {}),
   };
 }

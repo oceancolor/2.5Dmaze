@@ -4,11 +4,13 @@
 //   GET  /api/v1/matches            我的战绩（按收到时间倒序，?limit=&before=）
 //   GET  /api/v1/matches/:id        详情（只有本人可见；别人的一律 404，不泄露是否存在）：含对局报告与思路原文
 //   GET  /api/v1/matches/:id/record 下载记录 JSONL
+//   GET  /api/v1/matches/:id/llm-log 下载这局的大模型对话（接大模型模式；来自服务器对话日志，保留期内）
 
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { HttpError, compareVersions, parseClient, readJson, sendJson } from '../http.mjs';
 import { seatSource, verifyRecord } from '../verifier.mjs';
 import { authenticate, sha256 } from './accounts.mjs';
+import { buildTalkExport, talkEntryFromLog } from '../../src/app/talk-export.js';
 
 export const RECORD_LIMIT = 1024 * 1024;
 const MATCH_ID = /^[A-Za-z0-9_-]{16,64}$/;
@@ -98,6 +100,7 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
     configHash: v.meta.configHash,
     playerMode: v.playerMode,
     mapSize: v.mapSize,
+    vision: v.vision,
     seed: v.meta.seed,
     mapHash: v.meta.mapHash,
     turns: v.turns,
@@ -161,4 +164,36 @@ export function getRecord(req, res, ctx, id) {
     'Content-Length': text.length,
   });
   res.end(text);
+}
+
+/**
+ * 战绩里的「下载对话」（接大模型模式）：服务器对话日志里这一局本人的全部调用 + 存档记录里每次决策的结局，
+ * 格式与结算卡「导出 AI 对话」相同（src/app/talk-export.js）。只有本人可下载；不含 key / keyId / 用户 id。
+ * 返回 JSON {matchId, calls, filename, jsonl}（客户端 sync.call 只认 JSON）。
+ */
+export async function getLlmLog(req, res, ctx, id) {
+  const row = ownMatch(req, id, ctx);
+  const log = ctx.llmLog;
+  if (!log || !log.enabled) throw new HttpError(404, 'llm_log_disabled', '这台游戏服务器没有开启对话日志（LLM_LOG_DIR=off），下载不了对话');
+  const entries = await log.readMatch(id, row.user_id);
+  if (!entries.length) {
+    throw new HttpError(404, 'llm_log_missing', `服务器上没有这局的对话日志：日志只保留 ${log.retentionDays} 天，且只记录经服务器中转的调用（接大模型模式）`);
+  }
+  const d = ctx.store.getMatchDetail(id);
+  const seat = Number.isInteger(entries[0].seat) ? entries[0].seat : 0;
+  const strat = (d.strategies || []).find((s) => s.seat === seat) || null;
+  const first = entries[0];
+  const text = gunzipSync(ctx.store.recordGz(id)).toString('utf8');
+  const jsonl = buildTalkExport({
+    meta: {
+      matchId: id, seed: d.seed, mapSize: d.mapSize ?? null, seat, provider: first.provider ?? null, model: first.model ?? null,
+      reasoning: Boolean(first.reasoning), autonomy: strat ? strat.autonomy : null, safetyGate: strat ? strat.safetyGate : null,
+      strategy: strat ? strat.text : null, verify: d.verify, turns: d.turns, source: 'server-log',
+    },
+    calls: entries.filter((e) => e.seat === seat).map(talkEntryFromLog),
+    recordJSONL: text,
+    seat,
+    exportedAt: ctx.now(),
+  });
+  sendJson(res, 200, { matchId: id, calls: entries.length, filename: `maze-ai-talk-${d.seed}-${id.slice(0, 8)}.jsonl`, jsonl });
 }

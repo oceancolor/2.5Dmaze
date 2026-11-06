@@ -62,7 +62,13 @@ const DEFAULTS = {
     },
   },
 
-  vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true },
+  // 视野规则（2026-11-06 实验，src/config/vision-modes.js）：mode 缺省 = 'radius'（现行）。
+  // 三个新键缺省为 undefined —— configHash 跳过 undefined，所以默认配置的哈希与旧记录一致。
+  //   radius   对手只在切比雪夫 entityRadius 内实时可见，视野外给最后目击（现行）
+  //   full     所有在场对手的实时位置全公开（意图仍不公开）
+  //   delayed  视野内实时；视野外给 delayTurns 回合前的真实位置
+  //   radar    视野内实时；每 radarEvery 回合把全员当前位置广播一次
+  vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true, mode: undefined, delayTurns: undefined, radarEvery: undefined },
 
   ai: {
     homeFactorX10: 13, // 终盘区 / 回家阈值：stamina*10 <= dist*13
@@ -188,6 +194,10 @@ export function validateConfig(c) {
   if (!(c.maze.thinKeep > 0 && c.maze.thinKeep < 1)) throw new Error('maze.thinKeep must be in (0,1)');
   if (!(c.match.playerMode in c.rules.staminaByMode)) throw new Error(`unknown playerMode ${c.match.playerMode}`);
   if (c.treasure.gemsPerColor < 1) throw new Error('treasure.gemsPerColor >= 1');
+  const V = c.vision;
+  if (V.mode !== undefined && !['radius', 'full', 'delayed', 'radar'].includes(V.mode)) throw new Error(`unknown vision.mode ${V.mode}`);
+  if (V.mode === 'delayed' && !(Number.isInteger(V.delayTurns) && V.delayTurns >= 1)) throw new Error('vision.delayTurns must be an integer >= 1');
+  if (V.mode === 'radar' && !(Number.isInteger(V.radarEvery) && V.radarEvery >= 1)) throw new Error('vision.radarEvery must be an integer >= 1');
   return c;
 }
 

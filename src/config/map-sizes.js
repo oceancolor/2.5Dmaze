@@ -9,6 +9,7 @@
 //      AI 调用预算不缩：它只是上限，回合少了自然用得少。
 
 import { DEFAULT_CONFIG } from './default.config.js';
+import { DEFAULT_VISION, visionOverrides } from './vision-modes.js';
 
 const BASE = DEFAULT_CONFIG;
 
@@ -89,6 +90,12 @@ export function sizeOverrides(id = DEFAULT_MAP_SIZE) {
 }
 
 /** 合并玩家模式与规格的覆盖项（客户端开局与服务器白名单共用，保证同一份配置 → 同一个哈希）。 */
-export function matchOverrides(playerMode, mapSize = DEFAULT_MAP_SIZE) {
-  return { ...sizeOverrides(mapSize), match: { playerMode } };
+/**
+ * 合并玩家模式、地图规格与视野规则的覆盖项（客户端开局与服务器白名单共用，保证同一份配置 → 同一个哈希）。
+ * vision 缺省 radius（现行）→ 不加任何覆盖，哈希与引入视野规则前一致。
+ */
+export function matchOverrides(playerMode, mapSize = DEFAULT_MAP_SIZE, vision = DEFAULT_VISION) {
+  const size = sizeOverrides(mapSize);
+  const vis = visionOverrides(vision);
+  return { ...size, ...vis, match: { playerMode } };
 }

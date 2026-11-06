@@ -211,6 +211,76 @@ test('对话日志：中转与测试连接逐行写 JSONL（按日期 / 对局�
   }
 });
 
+test('战绩下载对话（2026-11-05 批次 1）：本人取回这局的全部调用 + 决策结局，与结算卡导出同格式；别人 404；无日志 / 关日志如实提示；不含 key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maze-llmlog-'));
+  const llmLog = createLlmLog({ dir, now: () => 1_800_000_000_000 });
+  const s = await boot({ llmLog });
+  const off = await boot();
+  try {
+    const A = await s.guest();
+    const B = await s.guest();
+    const k = await s.call('POST', '/api/v1/keys', { token: A, body: { provider: 'hunyuan', apiKey: SECRET } });
+    const M = mid(77);
+    const msgs = openingMessages();
+    assert.equal((await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: k.json.keyId, matchId: M, seat: 0, kind: 'plan', messages: msgs } })).status, 200);
+    s.upstream.set(() => ({ status: 503, text: '' }));
+    assert.equal((await s.call('POST', '/llm/v1/chat', { token: A, body: { keyId: k.json.keyId, matchId: M, seat: 0, kind: 'repair', messages: msgs } })).status, 502);
+
+    const record = (seed) => {
+      const sched = createScheduler(BCFG, seed, {
+        seatLabels: ['byok:hunyuan/hy4-preview', 'heuristic', 'heuristic', 'heuristic'],
+        players: [{ seat: 0, provider: 'hunyuan', model: 'hy4-preview', autonomy: 'blend', safetyGate: true }],
+        controllers: (m) => [
+          createPlanner({ map: m.map, seat: 0, cfg: BCFG, seed: m.seed, pool: createAgentPool(BCFG), persona: '先凑红黄绿', autonomy: 'blend',
+            transport: (req, r) => r.deliver(mockPlan(req.payload, req.persona, { contract: true })) }),
+          ...[1, 2, 3].map((i) => createHeuristic(m.map, i, BCFG, m.seed)),
+        ],
+      });
+      sched.runSync(0, 5000);
+      return sched.toJSONL();
+    };
+    const up = await s.call('POST', '/api/v1/matches', { token: A, body: { matchId: M, record: record(9), strategy: { seat: 0, autonomy: 'blend', safetyGate: true, text: '先凑红黄绿' } } });
+    assert.equal(up.status, 201, up.text);
+
+    const r = await s.call('GET', `/api/v1/matches/${M}/llm-log`, { token: A });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.calls, 2);
+    assert.match(r.json.filename, /^maze-ai-talk-.*\.jsonl$/);
+    const lines = r.json.jsonl.trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(lines[0].t, 'meta');
+    assert.equal(lines[0].source, 'server-log');
+    assert.equal(lines[0].strategy, '先凑红黄绿');
+    assert.equal(lines[0].model, 'hy4-preview');
+    const calls = lines.filter((l) => l.t === 'call');
+    assert.deepEqual(calls.map((c) => [c.kind, c.ok]), [['plan', true], ['repair', false]]);
+    assert.equal(calls[0].requestTurn, 1, '发起回合从局面里取回');
+    assert.equal(calls[0].why, 'start');
+    assert.deepEqual(calls[0].messages, msgs);
+    assert.ok(calls[0].reply.length > 0);
+    assert.match(calls[1].error, /503/);
+    assert.ok(lines.some((l) => l.t === 'outcome'), '附每次决策的结局（来自存档记录）');
+    for (const bad of [SECRET, k.json.keyId, 'keyHint', 'userId']) assert.equal(r.json.jsonl.includes(bad), false, `不含 ${bad}`);
+
+    assert.equal((await s.call('GET', `/api/v1/matches/${M}/llm-log`, { token: B })).status, 404, '别人的对局 404');
+    const M2 = mid(78);
+    assert.equal((await s.call('POST', '/api/v1/matches', { token: A, body: { matchId: M2, record: record(10) } })).status, 201);
+    const miss = await s.call('GET', `/api/v1/matches/${M2}/llm-log`, { token: A });
+    assert.equal(miss.status, 404);
+    assert.equal(miss.json.error, 'llm_log_missing');
+    assert.match(miss.json.message, /保留 30 天/);
+
+    const C = await off.guest();
+    assert.equal((await off.call('POST', '/api/v1/matches', { token: C, body: { matchId: M, record: record(9) } })).status, 201);
+    const dis = await off.call('GET', `/api/v1/matches/${M}/llm-log`, { token: C });
+    assert.equal(dis.status, 404);
+    assert.equal(dis.json.error, 'llm_log_disabled');
+  } finally {
+    await s.close();
+    await off.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('对话日志：超过保留天数的日期目录被清理；不配目录 = 关闭', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'maze-llmlog-'));
   try {

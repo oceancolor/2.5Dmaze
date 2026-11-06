@@ -18,6 +18,7 @@
     "size": "node tools/size-budget.mjs",
     "calibrate": "node tools/calibrate.mjs",
     "bench": "node tools/bench.mjs",
-    "eval": "node tools/maze-eval.mjs"
+    "eval": "node tools/maze-eval.mjs",
+    "exp:vision": "node tools/vision-experiment.mjs"
   }
 }

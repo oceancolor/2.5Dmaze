@@ -24,6 +24,13 @@
   --grain: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .24 0 0 0 0 .2 0 0 0 0 .15 0 0 0 .11 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
   --fiber: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='.012 .35' numOctaves='2' seed='7' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .1 0 0 0 0 .07 0 0 0 0 .04 0 0 0 .5 -.12'/></filter><rect width='100%' height='100%' filter='url(%23f)'/></svg>");
   --woodbg: var(--fiber), var(--grain), linear-gradient(180deg, var(--wood-l) 0%, var(--wood) 38%, var(--wood-d) 100%);
+  /* 半透明面板（小地图、记分牌、宝石区、动态广播共用一套，2026-11-06 批次 2）：底色只有一成，透出游戏画面；悬停变实 */
+  --glass-bg: rgba(28, 22, 16, .1);
+  --glass-bg-hover: rgba(28, 22, 16, .6);
+  --glass-border: rgba(191, 164, 106, .75);
+  --glass-text: #F4E8C8;
+  --glass-muted: #E6D5AC;
+  --glass-shadow: 0 1px 2px rgba(0, 0, 0, .9), 0 0 4px rgba(0, 0, 0, .55);
 }
 
 * { box-sizing: border-box; }
@@ -94,8 +101,27 @@ code { font: 12px/1.3 ui-monospace, "Cascadia Mono", Consolas, monospace; backgr
 .frame.lg > .rim { --cut: 15px; padding: 3px; }
 .frame.lg > .rim > .in { --cut: 13px; padding: 20px 26px 22px; }
 
-/* 厚度：投影挂在分区容器上（clip-path 会裁掉元素自身的阴影） */
-.hud, .setup-wrap, .endcard > .frame { filter: drop-shadow(0 5px 0 rgba(18, 13, 9, .9)) drop-shadow(0 12px 14px rgba(0, 0, 0, .45)); }
+/* 厚度：投影挂在分区容器上（clip-path 会裁掉元素自身的阴影）。HUD 里只给不透明面板（.fx 包裹）加，
+   半透明面板不加：整块投影会把文字复制成一道 5px 的重影 */
+.hud.top, .hud.bottom, .hud > .fx, .setup-wrap, .endcard > .frame { filter: drop-shadow(0 5px 0 rgba(18, 13, 9, .9)) drop-shadow(0 12px 14px rgba(0, 0, 0, .45)); }
+
+/* ---------- 半透明面板（与小地图一致）---------- */
+.frame.glass, .frame.glass > .rim, .frame.glass > .rim > .in { clip-path: none; background: none; box-shadow: none; padding: 0; }
+.frame.glass > .rim > .in::before { display: none; }
+.frame.glass { border: 2px solid var(--glass-border); border-radius: 7px; background: var(--glass-bg); padding: 8px 10px 9px;
+  color: var(--glass-text); text-shadow: var(--glass-shadow); transition: background .15s; }
+.frame.glass:hover { background: var(--glass-bg-hover); }
+.glass .k, .glass .seat .tag, .glass .seat .mini .sets, .glass .seat .plan { color: var(--glass-muted); }
+.glass .seat { background: rgba(255, 246, 225, .05); box-shadow: inset 0 0 0 1px rgba(191, 164, 106, .45); color: var(--glass-text); }
+.glass .seat:hover { background: rgba(255, 246, 225, .12); filter: none; }
+.glass .seat.me { box-shadow: inset 0 0 0 2px #FFD84D; }
+.glass .seat .sc { color: var(--glass-text); }
+.glass .seat .tag { border-color: rgba(230, 213, 172, .5); }
+.glass .chip { background: rgba(0, 0, 0, .3); color: var(--glass-text); }
+.glass .chip.ok { color: #9BEBB3; }
+.glass .chip.bad { color: #FFA3B0; }
+.glass .chip.warn { color: #FFE38F; }
+.glass .gems .sets, .glass .think { text-shadow: none; }
 
 /* ---------- 深色铭牌 ---------- */
 .plate {
@@ -143,16 +169,20 @@ select:disabled { opacity: .5; }
 .hud { position: absolute; pointer-events: auto; display: flex; flex-direction: column; gap: 10px; }
 .hud.tl { left: 26px; top: 26px; width: 228px; }
 .hud.tr { right: 26px; top: 26px; width: 258px; align-items: stretch; }
-/* 小地图：右上、半透明、正方形俯视；宽于面板时向左伸出 */
-.minimap { align-self: flex-end; width: max-content; padding: 6px 7px 7px; border: 2px solid var(--brass); border-radius: 7px;
-  background: rgba(28, 22, 16, .58); color: #F4E8C8; opacity: .84; transition: opacity .15s; }
-.minimap:hover { opacity: 1; }
-.minimap .mm-head { display: flex; align-items: center; gap: 6px; font: 600 12px/1 var(--font); margin-bottom: 5px; }
+/* 小地图：右上、正方形俯视；宽于面板时向左伸出。底层地形半透明透出游戏画面，上层标记不透明；悬停变实（2026-11-05 批次 1） */
+.minimap { align-self: flex-end; width: max-content; padding: 6px 7px 7px; border: 2px solid var(--glass-border); border-radius: 7px;
+  background: var(--glass-bg); color: var(--glass-text); transition: background .15s; }
+.minimap:hover { background: var(--glass-bg-hover); }
+.minimap .mm-head { display: flex; align-items: center; gap: 6px; font: 600 12px/1 var(--font); margin-bottom: 5px; text-shadow: var(--glass-shadow); }
 .minimap.closed .mm-head { margin-bottom: 0; }
-.minimap .mm-head small { color: #CDBB92; font-weight: 400; }
+.minimap .mm-head small { color: #E6D5AC; font-weight: 400; }
 .minimap .mm-head .sp { flex: 1; }
-.minimap canvas { display: block; image-rendering: pixelated; cursor: crosshair; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0, 0, 0, .6); }
-.minimap .mm-legend { color: #CDBB92; margin-top: 4px; max-width: 288px; font-size: 11px; }
+.minimap .mm-stack { position: relative; }
+.minimap .mm-stack canvas { position: absolute; left: 0; top: 0; display: block; border-radius: 3px; }
+.minimap .mm-base { image-rendering: pixelated; opacity: .38; transition: opacity .15s; box-shadow: 0 0 0 1px rgba(0, 0, 0, .45); }
+.minimap:hover .mm-base { opacity: .92; }
+.minimap .mm-top { cursor: crosshair; }
+.minimap .mm-legend { color: var(--glass-muted); margin-top: 4px; font-size: 11px; text-shadow: var(--glass-shadow); }
 .hud.bl { left: 26px; bottom: 26px; width: 300px; }
 .hud.br { right: 26px; bottom: 26px; width: 318px; }
 .hud.top { left: 50%; top: 22px; transform: translateX(-50%); align-items: center; }
@@ -194,6 +224,9 @@ select:disabled { opacity: .5; }
   background: linear-gradient(180deg, rgba(58, 46, 35, .92), rgba(28, 22, 16, .92)); box-shadow: 0 2px 0 rgba(0, 0, 0, .5);
   display: flex; align-items: center; gap: 4px; animation: feedin .25s ease-out;
 }
+/* 左上动态广播：与小地图同一套半透明 */
+.feed.glass li { background: var(--glass-bg); border-color: var(--glass-border); color: var(--glass-text); text-shadow: var(--glass-shadow); box-shadow: none; transition: background .15s; }
+.feed.glass:hover li { background: var(--glass-bg-hover); }
 .feed li:nth-child(n+4) { opacity: .7; }
 .feed .t, .console .t { color: var(--brass); font-size: 10.5px; margin-right: 4px; font-variant-numeric: tabular-nums; }
 @keyframes feedin { from { transform: translateX(-8px); opacity: 0; } }

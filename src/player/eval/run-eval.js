@@ -6,6 +6,7 @@
 
 import { makeConfig } from '../../config/default.config.js';
 import { MAP_SIZES, isMapSize, matchOverrides } from '../../config/map-sizes.js';
+import { DEFAULT_VISION, VISION_IDS, VISION_PRESETS, isVision } from '../../config/vision-modes.js';
 import { createScheduler } from '../../app/scheduler.js';
 import { createMockTransport } from '../../app/transport.js';
 import { createMatch } from '../../core/state.js';
@@ -129,12 +130,13 @@ function summarizeSeat(games, seat) {
  * @param {{size?:string, seeds:Array<number>|string, seats:object[], makeScript:(o:object)=>object, subject?:number,
  *          baseline?:boolean, worst?:number, keepRecords?:boolean, onProgress?:(done:number, total:number)=>void}} o
  */
-export function runEval({ size = 'XS', seeds, seats, makeScript, subject = null, baseline = true, worst = 5, keepRecords = false, onProgress = null }) {
+export function runEval({ size = 'XS', vision = DEFAULT_VISION, seeds, seats, makeScript, subject = null, baseline = true, worst = 5, keepRecords = false, onProgress = null }) {
   if (!isMapSize(size)) throw new Error(`未知地图规格 ${size}（可选 ${Object.keys(MAP_SIZES).join(' / ')}）`);
+  if (!isVision(vision)) throw new Error(`未知视野规则 ${vision}（可选 ${VISION_IDS.join(' / ')}）`);
   if (!Array.isArray(seats) || seats.length !== 4) throw new Error('seats 必须是 4 个座位配置');
   const list = parseSeeds(seeds);
   if (!list.length) throw new Error('没有种子');
-  const cfg = makeConfig(matchOverrides('script', size));
+  const cfg = makeConfig(matchOverrides('script', size, vision));
   const subj = subject ?? Math.max(0, seats.findIndex((s) => s.kind === 'script'));
   const total = list.length * (baseline && seats[subj].kind === 'script' ? 2 : 1);
   let done = 0;
@@ -147,7 +149,7 @@ export function runEval({ size = 'XS', seeds, seats, makeScript, subject = null,
     return g;
   });
   const result = {
-    size, mapSize: cfg.maze.size, seeds: list.length, subject: subj,
+    size, vision, mapSize: cfg.maze.size, seeds: list.length, subject: subj,
     rules: { stamina: cfg.rules.staminaByMode.script, maxTurns: cfg.rules.maxTurns },
     seats: seats.map((sp, i) => ({ seat: i, kind: sp.kind, label: sp.kind === 'script' ? scriptMeta(sp, i).name : sp.kind === 'mock' ? `模拟大模型·${sp.persona}` : '启发式', ...summarizeSeat(games, i) })),
     turnsP50: q(games.map((g) => g.turns), 0.5),
@@ -183,7 +185,7 @@ const STATUS_ZH = { escaped: '到达', failed: '出局' };
 /** 结果 → Markdown（命令行与「整局试跑」同一份文字）。 */
 export function renderMarkdown(r) {
   const L = [];
-  L.push(`## 整局评测 · ${r.size}（${r.mapSize}×${r.mapSize}）· ${r.seeds} 局 · 体力 ${r.rules.stamina} · 上限 ${r.rules.maxTurns} 回合`);
+  L.push(`## 整局评测 · ${r.size}（${r.mapSize}×${r.mapSize}）· 视野 ${VISION_PRESETS[r.vision || DEFAULT_VISION].label} · ${r.seeds} 局 · 体力 ${r.rules.stamina} · 上限 ${r.rules.maxTurns} 回合`);
   L.push('');
   L.push('| 座位 | 控制 | 到达率 | 平均分（未到达计 0） | 到达者均分 | 平均名次 | 冠军率 |');
   L.push('|---|---|---|---|---|---|---|');
