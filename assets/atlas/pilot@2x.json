@@ -13,7 +13,7 @@
  },
  "meta": {
   "ss": 4,
-  "samples": 64,
+  "samples": 48,
   "fit": {
    "scale": 1.1058,
    "playerWidth": 32,
@@ -47,7 +47,7 @@
    "aiWidth": 29.2
   },
   "blender": "4.2.0",
-  "totalSec": 19.9
+  "totalSec": 284.6
  },
  "frames": {
   "ACT_AIA_BLOCK_e_00": {

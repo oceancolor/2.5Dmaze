@@ -14,6 +14,7 @@
 import * as S from './sprites.js';
 import { tileCenter } from './iso.js';
 import { ACTOR_COLORS, GEM_COLORS_BASE, HALO, INK, REVEAL, UI } from './palette.js';
+import { drawBurst } from './fx.js';
 import { createChunkCache, bakeOverview, chunkBounds, wallSprite, GROUND_BG } from './chunk-cache.js';
 import { createEnvScene } from './env.js';
 
@@ -127,6 +128,9 @@ export function createRenderer({ canvas, map, cfg, atlas, envAtlas = null, makeC
       } else if (l.proc === 'badge') {
         ctx.setTransform(s, 0, 0, s, e.dx - 32 * s, e.dy - 56 * s);
         S.drawGhostBadge(ctx, 34, 0, l.text, UI.font);
+      } else if (l.proc === 'burst') {
+        ctx.setTransform(s, 0, 0, s, e.dx, e.dy);
+        drawBurst(ctx, l);
       } else if (l.proc === 'text') {
         ctx.setTransform(s, 0, 0, s, e.dx, e.dy + l.dy * s);
         ctx.globalAlpha = l.alpha;

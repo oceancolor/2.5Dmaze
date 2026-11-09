@@ -178,7 +178,7 @@ export function pack(name = 'pilot', { widths = { 1: 1024, 2: 2048 }, filter = (
 const isEnv = (s) => s.group === 'env';
 export const ATLASES = Object.freeze({
   pilot: { filter: (s) => !isEnv(s) },
-  env: { filter: isEnv, widths: { 1: 512, 2: 1024 } },
+  env: { filter: isEnv, widths: { 1: 1024, 2: 2048 } }, // 大景（城堡 / 巨像头）单件就有几百 px 宽
 });
 
 export function packAll() {

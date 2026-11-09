@@ -1003,22 +1003,11 @@ ENV_SPECS = [
     {'key': 'BUSH01', 'kind': 'bush', 'r': 10, 'shade': 'bush', 'flowers': 0},
     {'key': 'BUSH02', 'kind': 'bush', 'r': 8, 'shade': 'bush', 'flowers': 6},
     {'key': 'ROCK01', 'kind': 'rock', 'r': 8},
-    # 地标（只摆在左上 / 右上场外，样张页手工定点）：山墙小屋 / 蘑菇圆屋 / 圆木塔 / 石堆 ×2 / 发光玉石 ×2。
-    # 造型参照用户给的三张参考图（童话村落 + 低多边形等距小景），尺寸单位 = 屏幕像素；见下方「地标」段的说明。
-    {'key': 'CABIN01', 'kind': 'cottage', 'hx': 21, 'hy': 15, 'wall': 14, 'pitch': 50, 'eave': 5, 'gable_eave': 3, 'roof': 'a'},
-    {'key': 'CABIN02', 'kind': 'roundhouse', 'r': 20, 'wall': 19, 'cap': 28, 'flare': 1.45, 'roof': 'b'},
-    {'key': 'TOWER01', 'kind': 'tower', 'r': 12, 'h': 48, 'cap': 40},
-    {'key': 'STONES01', 'kind': 'stones', 'form': 'pile'},
-    {'key': 'STONES02', 'kind': 'stones', 'form': 'cairn'},
-    # 玉晶：(半径, 柱高, 尖高, 倾角°, 方位°, 离中心距离)；石座：(x, y, r)；悬浮碎晶：(方位°, 离中心距离, 离地高, 半径)
-    {'key': 'JADE01', 'kind': 'jade',
-     'crystals': [(11, 40, 15, 4, 120, 0), (7, 22, 10, 18, 100, 9.5), (6, 16, 8, 26, 210, 10), (4.5, 10, 6, 34, 320, 10)],
-     'rocks': [(-10, 9, 7.5), (11, 6, 6.2), (4, -12, 5.2), (-9, -7, 4.4)],
-     'float': [(40, 17, 34, 2.4), (200, 16, 46, 2.0), (300, 15, 22, 1.7)]},
-    {'key': 'JADE02', 'kind': 'jade',
-     'crystals': [(12, 32, 15, 9, 300, 0), (5.5, 13, 7, 30, 150, 11), (4.5, 9, 6, 36, 240, 11)],
-     'rocks': [(-9, 10, 7.6), (12, 4, 6.0), (-3, -12, 4.8)],
-     'float': [(60, 16, 30, 2.2), (220, 15, 40, 1.8)]},
+    # 红枫 / 橙枫（参考图 1 广场边的红叶树）
+    {'key': 'MAPLE01', 'kind': 'tree', 'r': 19, 'zc': 30, 'shade': 'maple', 'lobes': 4},
+    {'key': 'MAPLE02', 'kind': 'tree', 'r': 15, 'zc': 25, 'shade': 'maple2', 'lobes': 3},
+    # 2026-11-09 起地标换成按参考图重做的大景（town.py：古镇 / 童话村落 / 巨像遗迹 + 人物车辆）。
+    # 旧地标（小屋 / 圆屋 / 木塔 / 石堆 / 玉石，_cottage 等函数）不再出图。
 ]
 CLIFF_KINDS = ('SW', 'SE')
 CLIFF_VARIANTS = 3
@@ -1636,9 +1625,19 @@ def _jade(spec, pal, root, rnd):
 def build_env(spec, pal):
     root = C.empty(f'env_{spec["key"]}')
     rnd = random.Random(700 + sum(map(ord, spec['key'])))
-    {'tree': _tree, 'pine': _pine, 'bush': _bush, 'rock': _rock, 'cottage': _cottage, 'roundhouse': _roundhouse, 'tower': _tower,
-     'stones': _stones, 'jade': _jade}[spec['kind']](spec, pal, root, rnd)
+    kinds = {'tree': _tree, 'pine': _pine, 'bush': _bush, 'rock': _rock, 'cottage': _cottage, 'roundhouse': _roundhouse, 'tower': _tower,
+             'stones': _stones, 'jade': _jade}
+    if spec['kind'] not in kinds:
+        import town  # 2026-11-09 场外大景（建筑 / 人物 / 车辆 / 巨像），见 town.py
+        kinds = town.BUILD
+    kinds[spec['kind']](spec, pal, root, rnd)
     return root
+
+
+def all_env_specs():
+    """场外布景全部规格：林子 / 灌木 / 石块 + 大景（town.SPECS）。"""
+    import town
+    return ENV_SPECS + town.SPECS
 
 
 def _cliff_path(kind):

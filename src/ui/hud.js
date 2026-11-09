@@ -21,6 +21,7 @@ export const THINK_ZH = Object.freeze({ off: '关', low: '低', high: '高' });
 export const SEAT_NAMES = Object.freeze(['你', 'AI-A', 'AI-B', 'AI-C']);
 const HOME_COLORS = { ok: '#3FBF6A', warn: '#F2CE3B', bad: '#E8384F' };
 const SOURCE_ZH = {
+  replay: '当时的目标',
   llm: '大模型计划', 'llm-repair': '大模型计划（修复后）', guard: '引擎安全覆盖：回家', heuristic: '启发式', l3: '启发式（大模型熔断）',
   script: '脚本', 'auto-home': '引擎接管 · 自动回家', manual: '已切回手动', 'script-error': '脚本异常 · 沿意图兜底', 'script-invalid': '返回值无效 · 沿意图兜底',
   'script-timeout': '超时 · 沿意图兜底', 'manual-pending': '等待切回手动',
@@ -106,6 +107,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       <span class="seg"><button class="btn" data-a="zout" title="缩小（-）">－</button><button class="btn" data-a="zin" title="放大（=）">＋</button></span>
       <button class="btn" data-a="center" title="镜头回到自己（F）">归位</button>
       <button class="btn" data-a="map" title="方向映射（M）" data-k="mapping"></button>
+      <button class="btn" data-a="sound" title="音效开关（V）" data-k="sound">${actions.soundOn && actions.soundOn() ? '音效 开' : '音效 关'}</button>
       <button class="btn" data-a="setup" title="开局设置（Esc）">设置</button>
     </div>
     <div class="plate spectate" data-k="spectate" hidden>你已结算 · 观战中 <button class="btn brass" data-a="toend">跳到结算（Enter）</button></div>`;
@@ -129,6 +131,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
     else if (a === 'zin') actions.zoomBy(-1);
     else if (a === 'center') actions.recenter();
     else if (a === 'map') actions.toggleMapping();
+    else if (a === 'sound' && actions.toggleSound) b.textContent = actions.toggleSound() ? '音效 开' : '音效 关';
     else if (a === 'setup') actions.openSetup();
     else if (a === 'toend') actions.skipToEnd();
     else if (a === 'again') actions.newMatch('new');
@@ -414,7 +417,8 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       else if (sched.waitingFor.length && waitMs > 300) {
         hint.innerHTML = sched.waitingFor.includes(sched.playerSeat) && !wf.length ? '等你的脚本返回…' : `等待 ${wf.join('、')} 规划…`;
       } else if (!active) hint.textContent = '观战中 · 点右下名牌切换镜头跟随 · 拖拽平移 · 滚轮缩放';
-      else if (!sched.manual) hint.textContent = `你的 ${seats[sched.playerSeat]?.label ?? 'Agent'} 正在代打 · 拖拽平移 · 滚轮缩放 · Esc 设置`;
+      else if (sched.controllers[0] && sched.controllers[0].kind === 'recorded') hint.textContent = '回放中 · [ ] 跳到上 / 下一个决策 · P 暂停 · 拖拽平移 · 滚轮缩放';
+    else if (!sched.manual) hint.textContent = `你的 ${seats[sched.playerSeat]?.label ?? 'Agent'} 正在代打 · 拖拽平移 · 滚轮缩放 · Esc 设置`;
       else {
         const m = MAPPINGS[mapping];
         const arrows = `↑${m.up} →${m.right} ↓${m.down} ←${m.left}`;

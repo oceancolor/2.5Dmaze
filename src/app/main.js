@@ -21,6 +21,9 @@ import { saveRecord } from './storage.js';
 import { createSync, newMatchId, syncText } from './sync.js';
 import { buildTalkExport, talkEntry, TALK_MAX_CALLS } from './talk-export.js';
 import { loadMemory, matchTimeline, memoryScope, writeMemory } from './coach.js';
+import { createPlayback, seatLabelsOf } from '../record/playback.js';
+import { createSfx } from './sfx.js';
+import { createReplayBar } from '../ui/replay-bar.js';
 import { runLlmTrial } from '../player/eval/llm-eval.js';
 import { createInput, MAPPINGS } from '../player/input.js';
 import { createScriptController, testScript } from '../player/script-host.js';
@@ -133,16 +136,146 @@ function compareText(mine, base, proxied) {
     + `${d === null ? '' : d === 0 ? '，打平' : `，${d > 0 ? '多' : '少'} ${Math.abs(d)} 分`}${proxied ? '（本地代理 / 脚本对手按启发式算）' : ''}`;
 }
 
+const sfx = createSfx({ now });
+// 浏览器要求手势后才能出声：第一次按键 / 点击时解锁
+for (const ev of ['keydown', 'pointerdown']) addEventListener(ev, () => sfx.unlock(), { capture: true });
+
 function disposeGame() {
   if (!game) return;
   for (const c of game.sched.controllers) if (c && c.dispose) c.dispose();
   if (game.minimap && game.minimap.dispose) game.minimap.dispose();
+  if (game.replay) game.replay.bar.dispose();
   game.offs.forEach((f) => f());
   game = null;
 }
 
+/**
+ * 对局画面（正常对局与回放共用）：渲染器、镜头、动画、HUD、小地图、帧监视。
+ * 场景 / HUD / 小地图怎么改，两边都跟着变。attach(sched) 挂上回合与撞墙动画，返回取消函数。
+ */
+function mountView({ match, cfg, seats, playerSeat }) {
+  const renderer = createRenderer({ canvas, map: match.map, cfg, atlas, envAtlas });
+  renderer.resize(innerWidth, innerHeight, devicePixelRatio || 1);
+  const camera = createCamera({ zoomLevels: cfg.render.zoomLevels, size: match.map.size });
+  const v = {
+    renderer,
+    camera,
+    animator: createAnimator({ map: match.map, cfg, playerSeat }),
+    hud: createHud(hudRoot, { cfg, atlas, seats, actions }),
+    minimap: null,
+    monitor: null,
+  };
+  v.minimap = createMinimap(hudRoot.querySelector('.hud.tr'), {
+    map: match.map,
+    cfg,
+    onLook: (wx, wy) => {
+      if (camera.overview) camera.setZoomIndex(0);
+      camera.lookAt(wx, wy);
+    },
+  });
+  v.monitor = createFrameMonitor({
+    onTrip: () => {
+      if (renderer.stepDown()) v.hud.toast(`帧时间持续超过 16.7 ms，画质降到 L${renderer.quality}`, 2600);
+    },
+  });
+  // 音效（2026-11-09）：动画层在排特效的同时给出提示（同一时刻），这里按镜头左右定位、别人的事件减半音量
+  const cue = (list) => {
+    for (const c of list || []) {
+      let pan = 0;
+      if (c.x !== undefined) {
+        const [wx] = tileCenter(c.x, c.y);
+        pan = ((wx - camera.x) * camera.zoom) / Math.max(1, innerWidth / 2);
+      }
+      sfx.play(c.type, { at: c.at, pan: pan * 0.7, gain: c.seat === playerSeat ? 1 : 0.5, c: c.c ?? 0 });
+    }
+  };
+  v.attach = (sched, { feed = true } = {}) => [
+    sched.on('turn', (l) => {
+      cue(v.animator.onTurn(l));
+      if (feed) v.hud.onTurn(l);
+    }),
+    sched.on('bump', (b) => cue(v.animator.onBump(b))),
+  ];
+  return v;
+}
+
+// ───────── 回放（2026-11-09）：从服务器取记录，用录像控制器在正常的对局画面里重新播一遍 ─────────
+
+async function startReplay(matchId) {
+  const r = await sync.call('GET', `/api/v1/matches/${encodeURIComponent(matchId)}/replay`);
+  if (r.status !== 200 || !r.json || typeof r.json.record !== 'string') {
+    setupUi.show({ resume: Boolean(game && !game.sched.state.ended), err: `回放读取失败：${r.status === 0 ? '连不上游戏服务器' : (r.json && r.json.message) || `HTTP ${r.status}`}` });
+    return;
+  }
+  let pb;
+  try {
+    pb = createPlayback(r.json.record);
+  } catch (e) {
+    setupUi.show({ resume: Boolean(game && !game.sched.state.ended), err: `这局没法回放：${e.message}` });
+    return;
+  }
+  const seats = seatLabelsOf(pb.meta);
+  const cfg = pb.cfg;
+  disposeGame();
+  let sched = pb.makeScheduler(1);
+  const match = sched.match;
+  const view = mountView({ match, cfg, seats, playerSeat: 0 });
+  let speed = 2;
+  sched.setSpeed(speed);
+  const title = `${r.json.label || seats[0].label} · ${pb.mapSize || ''} · 种子 ${pb.seed}`;
+  const live = { offs: view.attach(sched) };
+  const reattach = (s) => {
+    live.offs.forEach((f) => f());
+    live.offs = [...view.attach(s, { feed: false }), s.on('spectate', () => s.setSpeed(speed))];
+    game.offs = live.offs;
+  };
+  const seek = (turn) => {
+    const wasPaused = game.sched.paused;
+    const s = pb.makeScheduler(turn);
+    s.setSpeed(speed);
+    s.setPaused(wasPaused);
+    view.animator = createAnimator({ map: match.map, cfg, playerSeat: 0 });
+    game.animator = view.animator;
+    game.sched = s;
+    sched = s;
+    reattach(s);
+  };
+  const bar = createReplayBar(hudRoot, {
+    title,
+    endTurn: pb.endTurn,
+    entries: r.json.timeline ? r.json.timeline.entries : [],
+    onToggle: () => {
+      if (game.sched.state.ended) seek(1);
+      else game.sched.setPaused(!game.sched.paused);
+    },
+    onSpeed: (v) => {
+      speed = v;
+      game.sched.setSpeed(v);
+    },
+    onSeek: (t) => seek(t),
+    onExit: () => {
+      disposeGame();
+      setupUi.show({ resume: false });
+    },
+  });
+  game = {
+    sched, renderer: view.renderer, camera: view.camera, animator: view.animator, hud: view.hud, minimap: view.minimap, monitor: view.monitor,
+    pool: null, setup: setupUi.setup, seats, follow: 0, offs: live.offs, matchId, playerAI: null, held: 'ai', usage: null, talk: [], usesLLM: false,
+    replay: { bar, pb },
+  };
+  reattach(sched);
+  boot.hidden = true;
+  setupUi.hide();
+  view.hud.toast(`回放：${title}`, 2400);
+}
+
 async function startMatch(setup, { sameSeed = false } = {}) {
   const p = setup.player;
+  // WorkBuddy 上场（批次 7）：对局在游戏服务器上、由 WorkBuddy 通过 MCP 来下，本地不开局
+  if (p.mode === 'workbuddy') {
+    setupUi.show({ resume: Boolean(game && !game.sched.state.ended), err: 'WorkBuddy 上场的对局在 WorkBuddy 的任务会话里进行：复制设置页上的提示词粘贴过去即可' });
+    return;
+  }
   // 模式 B：开局前确认选中的 key 还在服务器上（「仅本次会话」的 key 24 小时后丢弃；服务器重启也会丢）
   let keyMeta = null;
   if (p.mode === 'byok') {
@@ -264,31 +397,11 @@ async function startMatch(setup, { sameSeed = false } = {}) {
   const sched = createScheduler(cfg, seed, { match, controllers: ctrls, seatLabels: seats.map((s) => s.tag), players, scripts });
   schedRef = sched;
   sched.setSpeed(setup.speed);
-  const renderer = createRenderer({ canvas, map: match.map, cfg, atlas, envAtlas });
-  renderer.resize(innerWidth, innerHeight, devicePixelRatio || 1);
-  const camera = createCamera({ zoomLevels: cfg.render.zoomLevels, size: match.map.size });
-  const animator = createAnimator({ map: match.map, cfg, playerSeat: sched.playerSeat });
-  const hud = createHud(hudRoot, { cfg, atlas, seats, actions });
+  const view = mountView({ match, cfg, seats, playerSeat: sched.playerSeat });
+  const { renderer, camera, animator, hud, minimap, monitor } = view;
   hudRef = hud;
-  const minimap = createMinimap(hudRoot.querySelector('.hud.tr'), {
-    map: match.map,
-    cfg,
-    onLook: (wx, wy) => {
-      if (camera.overview) camera.setZoomIndex(0);
-      camera.lookAt(wx, wy);
-    },
-  });
-  const monitor = createFrameMonitor({
-    onTrip: () => {
-      if (renderer.stepDown()) hud.toast(`帧时间持续超过 16.7 ms，画质降到 L${renderer.quality}`, 2600);
-    },
-  });
   const offs = [
-    sched.on('turn', (l) => {
-      animator.onTurn(l);
-      hud.onTurn(l);
-    }),
-    sched.on('bump', (b) => animator.onBump(b)),
+    ...view.attach(sched),
     sched.on('drop', () => hud.toast('输入太快：缓冲已满（3），丢弃了 1 次')),
     sched.on('spectate', () => hud.toast(`你已结算，切到 ${cfg.motion.spectateSpeed}× 观战`, 2400)),
     sched.on('manual', (e) => hud.toast(`脚本${e.reason}，已切回手动操作`, 3200)),
@@ -362,6 +475,8 @@ async function startMatch(setup, { sameSeed = false } = {}) {
 
 const actions = {
   setSpeed: (v) => game && game.sched.setSpeed(v),
+  toggleSound: () => sfx.toggle(),
+  soundOn: () => sfx.on,
   toggleSkipAnim: () => game && game.sched.setSkipAnim(!game.sched.skipAnim),
   togglePause: () => game && game.sched.setPaused(!game.sched.paused),
   zoomBy: (k) => game && game.camera.zoomBy(k),
@@ -462,6 +577,7 @@ const setupUi = createSetup(setupRoot, {
     evaluate: (o) => runEvalInWorker(o),
   },
   onStart: (s) => startMatch(s),
+  onReplay: (id) => startReplay(id),
   history: () => sync.listMine(10),
   llm: {
     call: sync.call,
@@ -500,6 +616,13 @@ function onKey(e) {
   if (k in sp) actions.setSpeed(sp[k]);
   else if (k === 'Digit0') actions.toggleSkipAnim();
   else if (k === 'KeyP') actions.togglePause();
+  else if (k === 'KeyV' && game) {
+    const on = actions.toggleSound();
+    game.hud.toast(`音效：${on ? '开' : '关'}（V）`);
+    const btn = hudRoot.querySelector('[data-k="sound"]');
+    if (btn) btn.textContent = on ? '音效 开' : '音效 关';
+  }
+  else if (game && game.replay && (k === 'BracketLeft' || k === 'BracketRight')) game.replay.bar.jump(k === 'BracketRight' ? 1 : -1);
   else if (k === 'Minus' || k === 'NumpadSubtract') actions.zoomBy(1);
   else if (k === 'Equal' || k === 'NumpadAdd') actions.zoomBy(-1);
   else if (k === 'KeyF') actions.recenter();
@@ -570,7 +693,9 @@ frameLoop((t, dt) => {
   if (waitingNow) {
     if (waitSince < 0) waitSince = t;
   } else waitSince = -1;
-  const view = { viewer: sched.playerSeat, god: sched.spectating || sched.state.ended };
+  // 回放：全知视角（观战规则），并更新控制条
+  const view = { viewer: sched.playerSeat, god: Boolean(game.replay) || sched.spectating || sched.state.ended };
+  if (game.replay) game.replay.bar.update({ turn: sched.state.turn, paused: sched.paused, speed: sched.speed, ended: sched.state.ended });
   const fr = animator.frame(t, { state: sched.state, last: sched.last, view, quality: renderer.quality });
   const fs = followSeat(sched);
   const pos = fr.pos[fs];
@@ -609,7 +734,7 @@ frameLoop((t, dt) => {
   const q = new URLSearchParams(location.search);
   if (q.get('seed')) setupUi.patch({ seed: q.get('seed') });
   if (isMapSize(q.get('size'))) setupUi.patch({ mapSize: q.get('size') });
-  if (q.get('mode') && ['manual', 'script', 'byok'].includes(q.get('mode'))) {
+  if (q.get('mode') && ['manual', 'script', 'byok', 'workbuddy'].includes(q.get('mode'))) {
     const s = setupUi.setup;
     s.player.mode = q.get('mode');
     setupUi.patch({ player: s.player });

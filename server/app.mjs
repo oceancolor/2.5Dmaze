@@ -8,13 +8,16 @@
 //   /api/v1/usage            用量（M1）
 //   /api/v1/memory           玩家自己的 AI 的跨局经验（批次 6 harness）
 //   /llm/v1/chat             大模型中转：附上本人 key 调用服务商（M1，谁用谁付）
+//   /api/v1/mcp[/token]      WorkBuddy 上场：MCP 令牌（批次 7）
+//   /mcp                     WorkBuddy 上场：MCP 端点（Streamable HTTP，JSON-RPC）
 //   其他                     开发模式下托管游戏静态文件；生产由反向代理直接给静态文件也行
 
 import { HttpError, clientIp, createLimiter, selfOrigin, sendError, sendJson } from './http.mjs';
 import { createGuest, getMe } from './api/accounts.mjs';
-import { getLlmLog, getMatch, getRecord, listMatches, uploadMatch } from './api/matches.mjs';
+import { getLlmLog, getMatch, getRecord, getReplay, listMatches, uploadMatch } from './api/matches.mjs';
 import { createKey, deleteKey, getProviders, getUsage, listKeys, relayChat, testKey } from './api/llm.mjs';
 import { deleteMemory, getMemory, putMemory } from './api/memory.mjs';
+import { MCP_PATH, createMcpToken, createWorkbuddyHost, getMcpInfo, handleMcp, revokeMcpToken } from './workbuddy.mjs';
 import { createVault } from './vault.mjs';
 import { RULES_VERSION } from './verifier.mjs';
 import { createStaticHandler } from './static.mjs';
@@ -22,7 +25,7 @@ import { CLIENT_VERSION } from '../src/app/version.js';
 import { SCHEMA_VERSION } from './store/db.mjs';
 
 const CORS_HEADERS = {
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Maze-Client',
   'Access-Control-Max-Age': '600',
 };
@@ -57,7 +60,9 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
     keys: createLimiter({ capacity: L.keysPerMinute, perMinute: L.keysPerMinute, now }),
     test: createLimiter({ capacity: L.testPerMinute, perMinute: L.testPerMinute, now }),
     relay: createLimiter({ capacity: L.relayBurst, perMinute: L.relayPerMinute, now }),
+    mcp: createLimiter({ capacity: L.mcpBurst ?? 60, perMinute: L.mcpPerMinute ?? 120, now }),
   };
+  const workbuddy = createWorkbuddyHost({ store, now });
   const vault = createVault({ store, masterKey: opt.masterKey, now });
   const matchCalls = new Map();
   const serveStatic = root ? createStaticHandler(root, { cache: opt.staticCache }) : null;
@@ -89,10 +94,11 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
       if (m === 'GET') return listMatches(req, res, ctx);
       throw new HttpError(405, 'method_not_allowed', '只支持 GET / POST');
     }
-    const mm = /^\/api\/v1\/matches\/([^/]+)(\/record|\/llm-log)?$/.exec(p);
+    const mm = /^\/api\/v1\/matches\/([^/]+)(\/record|\/llm-log|\/replay)?$/.exec(p);
     if (mm) {
       if (m !== 'GET') throw new HttpError(405, 'method_not_allowed', '只支持 GET');
       if (mm[2] === '/llm-log') return getLlmLog(req, res, ctx, mm[1]);
+      if (mm[2] === '/replay') return getReplay(req, res, ctx, mm[1]);
       return mm[2] ? getRecord(req, res, ctx, mm[1]) : getMatch(req, res, ctx, mm[1]);
     }
     if (p === '/api/v1/providers') {
@@ -126,6 +132,15 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
     if (p === '/llm/v1/chat') {
       if (m !== 'POST') throw new HttpError(405, 'method_not_allowed', '只支持 POST');
       return relayChat(req, res, ctx);
+    }
+    if (p === '/api/v1/mcp') {
+      if (m !== 'GET') throw new HttpError(405, 'method_not_allowed', '只支持 GET');
+      return getMcpInfo(req, res, ctx);
+    }
+    if (p === '/api/v1/mcp/token') {
+      if (m === 'POST') return createMcpToken(req, res, ctx);
+      if (m === 'DELETE') return revokeMcpToken(req, res, ctx);
+      throw new HttpError(405, 'method_not_allowed', '只支持 POST / DELETE');
     }
     throw new HttpError(404, 'not_found', `没有这个接口：${m} ${p}`);
   }
@@ -161,7 +176,13 @@ export function createApp({ store, root = null, now = Date.now, upstream = undef
         }
         const ip = clientIp(req, opt.trustProxy);
         limiters.ip.take(ip);
-        await api(req, res, url, { store, now, opt, limiters, url, ip, vault, matchCalls, upstream, llmLog });
+        await api(req, res, url, { store, now, opt, limiters, url, ip, vault, matchCalls, upstream, llmLog, workbuddy });
+        return;
+      }
+      // WorkBuddy 上场（批次 7）：MCP 端点。不走浏览器 CORS（MCP 客户端不是网页）；凭 MCP 令牌鉴权
+      if (p === MCP_PATH) {
+        limiters.ip.take(clientIp(req, opt.trustProxy));
+        await handleMcp(req, res, { store, now, opt, limiters, url, workbuddy });
         return;
       }
       if (serveStatic && (await serveStatic(req, res, p))) return;

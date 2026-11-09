@@ -15,7 +15,9 @@ test('K11 / K12：当前运行时资源在预算内（首屏只算 1× 地图图
   assert.ok(r.totals.firstScreen < r.totals.total);
   assert.equal(classify('assets/atlas/pilot.png'), 'atlasFirst');
   assert.equal(classify('assets/atlas/pilot@2x.png'), 'atlas');
-  assert.equal(classify('assets/atlas/env.png'), 'atlas');
+  assert.equal(classify('assets/atlas/env.png'), 'env');
+  assert.equal(classify('assets/atlas/env@2x.json'), 'env');
+  assert.ok(r.totals.env > 0 && r.totals.env <= BUDGETS.env, '场外图集单独一档（非首屏）');
 });
 
 test('K14：超预算判定为失败（阳性对照），且脚本接在 npm test 链上', async () => {

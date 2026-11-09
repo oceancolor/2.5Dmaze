@@ -16,13 +16,19 @@ const BOX = {
   BUSH01: { l: -14, r: 14, t: 18, b: 4 },
   BUSH02: { l: -13, r: 13, t: 15, b: 3 },
   ROCK01: { l: -11, r: 11, t: 10, b: 4 },
-  CABIN01: { l: -37, r: 37, t: 49, b: 19 },
-  CABIN02: { l: -33, r: 33, t: 52, b: 16 },
-  TOWER01: { l: -22, r: 22, t: 76, b: 10 },
-  STONES01: { l: -18, r: 18, t: 20, b: 6 },
-  STONES02: { l: -16, r: 16, t: 30, b: 6 },
-  JADE01: { l: -17, r: 17, t: 40, b: 6 },
-  JADE02: { l: -15, r: 15, t: 34, b: 6 },
+  MAPLE: { l: -21, r: 21, t: 50, b: 6 },
+  // 2026-11-09 大景（近似 1× 包围盒）
+  TOWERE: { l: -45, r: 50, t: 205, b: 30 },
+  HOUSEE: { l: -70, r: 70, t: 90, b: 40 },
+  STALL: { l: -20, r: 20, t: 32, b: 12 },
+  CASTLE: { l: -80, r: 80, t: 230, b: 45 },
+  HOUSEW: { l: -55, r: 55, t: 100, b: 35 },
+  FOLK: { l: -6, r: 6, t: 20, b: 4 },
+  CART: { l: -24, r: 18, t: 18, b: 10 },
+  VAN: { l: -30, r: 30, t: 34, b: 14 },
+  CAR: { l: -24, r: 24, t: 24, b: 12 },
+  GIANTHEAD: { l: -120, r: 120, t: 200, b: 40 },
+  GIANTHAND: { l: -60, r: 60, t: 40, b: 30 },
   CLIFF_SW01: { l: -34, r: 34, t: 3, b: 48 },
   CLIFF_SW02: { l: -34, r: 34, t: 3, b: 48 },
   CLIFF_SW03: { l: -34, r: 34, t: 3, b: 48 },
@@ -72,17 +78,28 @@ test('前方布景只出现在菱形下侧（x 或 y 越界的那两条边）', 
   }
 });
 
-test('地标：全部在后方（菱形上侧），且玉石在两处空地附近', () => {
-  const marks = plan.back.filter((it) => /^ENV_(CABIN|TOWER|STONES|JADE)/.test(it.name));
-  assert.equal(marks.length, 10, `地标应有 10 件，实际 ${marks.length}`);
-  for (const it of marks) assert.ok(it.wy < SIZE * 2 * HALF_H - 200, `${it.name} 应在后方`);
-  assert.equal(plan.glows.length, 2);
-  assert.ok(plan.glows.every((g) => g.name.startsWith('ENV_JADE')));
+test('大景（2026-11-09）：古镇 / 村落 / 巨像三处都在后方、落地点都在菱形之外；巨像眼有琥珀辉光', () => {
+  for (const size of [16, 64, 128]) {
+    const p = buildPlan(size, boxOf);
+    const marks = p.back.filter((it) => /^ENV_(TOWERE|HOUSE|STALL|CASTLE|FOLK|CART|VAN|CAR|GIANT)/.test(it.name));
+    assert.ok(marks.length >= 36, `${size}: 大景（不含树）应有 36 件以上，实际 ${marks.length}`);
+    for (const it of marks) {
+      // 菱形内部：|wx|/HALF_W + |wy − size·HALF_H|/HALF_H ≤ size
+      const inside = Math.abs(it.wx) / HALF_W + Math.abs(it.wy - size * HALF_H) / HALF_H <= size;
+      assert.ok(!inside, `${size}: ${it.name} 的落地点 (${it.wx.toFixed(0)}, ${it.wy.toFixed(0)}) 在地图里`);
+      assert.ok(it.wy < size * HALF_H, `${size}: ${it.name} 应在上半区（后方）`);
+    }
+    assert.ok(p.glows.length === 1 && p.glows[0].name === 'ENV_GIANTHEAD_na_00');
+    assert.ok(p.clearings.some((c) => c[4] === 'plaza') && p.clearings.some((c) => c[4] === 'meadow'));
+  }
+  // 图集里缺某件（旧图集）就跳过那件，不抛
+  const partial = buildPlan(32, (n) => (/GIANT|CASTLE/.test(n) ? null : boxOf(n)));
+  assert.ok(!partial.back.some((it) => /GIANT|CASTLE/.test(it.name)));
 });
 
 test('林带有界：只铺到菱形外 RING 格', () => {
   // 世界坐标 wx = (gx − gy)·32，gx、gy 都在 [−RING, N+RING)，所以 |wx| ≤ (N + 2·RING)·32（再多一个抖动）
-  const lim = (SIZE + 2 * 14) * HALF_W + 64;
+  const lim = (SIZE + 2 * 20) * HALF_W + 64;
   for (const it of [...plan.back, ...plan.front]) {
     assert.ok(Math.abs(it.wx) <= lim, `${it.name} 的 x 超界：${it.wx}`);
     assert.ok(Math.abs(it.wy) <= lim + 2 * HALF_H, `${it.name} 的 y 超界：${it.wy}`);

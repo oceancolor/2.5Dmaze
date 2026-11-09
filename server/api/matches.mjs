@@ -11,6 +11,8 @@ import { HttpError, compareVersions, parseClient, readJson, sendJson } from '../
 import { seatSource, verifyRecord } from '../verifier.mjs';
 import { authenticate, sha256 } from './accounts.mjs';
 import { buildTalkExport, talkEntryFromLog } from '../../src/app/talk-export.js';
+import { configByHash } from '../../src/config/known.js';
+import { timelineFromRecord } from '../../src/ai/harness.js';
 
 export const RECORD_LIMIT = 1024 * 1024;
 const MATCH_ID = /^[A-Za-z0-9_-]{16,64}$/;
@@ -43,6 +45,17 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
   limiters.upload.take(user.id);
   // 记录作为 JSON 字符串传输，引号转义后体积约 1.3–1.5 倍
   const body = await readJson(req, RECORD_LIMIT * 2);
+  const r = saveMatch(store, user, { ...body, host: 'local', platform: client.platform, clientVersion: client.version, now });
+  sendJson(res, r.duplicate ? 200 : 201, r);
+}
+
+/**
+ * 校验并入库一局（客户端上传与服务器托管的对局共用，批次 7）。
+ * @param {{matchId:string, record:string, strategy?:object, startedAt?:number, endedAt?:number, host:string, platform:string, clientVersion:string, now:()=>number}} body
+ * @returns {object} getMatch 的结果 + duplicate
+ */
+export function saveMatch(store, user, body) {
+  const { now } = body;
   if (typeof body.matchId !== 'string' || !MATCH_ID.test(body.matchId)) throw new HttpError(400, 'bad_match_id', 'matchId 应为 16–64 位 [A-Za-z0-9_-]');
   if (typeof body.record !== 'string') throw new HttpError(400, 'bad_record', '缺少 record（JSONL 文本）');
   const bytes = Buffer.byteLength(body.record);
@@ -53,8 +66,7 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
   const prev = store.matchRow(body.matchId);
   if (prev) {
     if (prev.user_id !== user.id || prev.record_sha256 !== digest) throw new HttpError(409, 'match_id_conflict', '这个 matchId 已被另一份记录占用');
-    sendJson(res, 200, { ...store.getMatch(body.matchId), duplicate: true });
-    return;
+    return { ...store.getMatch(body.matchId), duplicate: true };
   }
 
   const v = verifyRecord(body.record);
@@ -92,9 +104,9 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
   const m = {
     id: body.matchId,
     userId: user.id,
-    host: 'local',
-    platform: client.platform,
-    clientVersion: client.version,
+    host: body.host,
+    platform: body.platform,
+    clientVersion: body.clientVersion,
     rulesVersion: v.meta.rulesVersion,
     recordVersion: v.meta.v,
     configHash: v.meta.configHash,
@@ -128,7 +140,7 @@ export async function uploadMatch(req, res, { store, now, opt, limiters }) {
     })
     : [];
   store.insertMatch(m, gzipSync(Buffer.from(body.record, 'utf8')), bytes, stats, strategies);
-  sendJson(res, 201, { ...store.getMatch(m.id), duplicate: false });
+  return { ...store.getMatch(m.id), duplicate: false };
 }
 
 export function listMatches(req, res, { store, now, url }) {
@@ -164,6 +176,33 @@ export function getRecord(req, res, ctx, id) {
     'Content-Length': text.length,
   });
   res.end(text);
+}
+
+/** 由大模型 / WorkBuddy 决策的座位才有复盘时间线（plan 行驱动）。 */
+const DECIDES = (tag) => typeof tag === 'string' && (tag.startsWith('byok:') || tag.startsWith('mcp:') || tag.startsWith('prompt-'));
+
+/**
+ * 回放（2026-11-09）：记录原文 + 座位 0 的决策复盘时间线（有的话）。只有本人可看；JSON 返回（客户端 sync.call 只认 JSON）。
+ */
+export function getReplay(req, res, ctx, id) {
+  const row = ownMatch(req, id, ctx);
+  const text = gunzipSync(ctx.store.recordGz(id)).toString('utf8');
+  const m = ctx.store.getMatch(id);
+  const tag = m.seats[0] ? m.seats[0].tag : '';
+  let timeline = null;
+  if (DECIDES(tag)) {
+    const meta = JSON.parse(text.slice(0, text.indexOf('\n')));
+    const k = configByHash(meta.configHash);
+    if (k) {
+      try {
+        timeline = timelineFromRecord(text, k.cfg, 0);
+      } catch {
+        timeline = null; // 复盘失败不影响回放本身
+      }
+    }
+  }
+  const label = tag === 'mcp:workbuddy' ? 'WorkBuddy 上场' : tag.startsWith('byok:') ? `我的大模型 · ${tag.slice(5).split('/').pop()}` : null;
+  sendJson(res, 200, { matchId: id, verify: row.verify, mapSize: m.mapSize ?? null, label, record: text, timeline });
 }
 
 /**

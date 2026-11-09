@@ -333,6 +333,35 @@ textarea.persona { font: 13.5px/1.6 var(--font); color: var(--text); background:
 .hist th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .06em; border-bottom: 2px solid var(--ink); padding: 3px 6px; }
 .hist td { padding: 5px 6px; border-bottom: 1px solid rgba(126, 102, 56, .3); font-variant-numeric: tabular-nums; }
 .endcard .sync { margin-top: 4px; min-height: 16px; }
+/* ---------- 回放（2026-11-09）：控制条在底部居中、决策栏在左侧中部；只用全局配色变量 ---------- */
+.replaybar { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; width: min(760px, 92vw); pointer-events: auto;
+  border: 2px solid var(--glass-border); border-radius: 8px; background: rgba(28, 22, 16, .62); color: var(--glass-text); padding: 6px 10px 8px; text-shadow: var(--glass-shadow); }
+.replaybar .rb-row { display: flex; align-items: center; gap: 6px; }
+.replaybar .rb-row + .rb-row { margin-top: 5px; }
+.replaybar .rb-title { font-size: 12.5px; }
+.replaybar .sp { flex: 1; }
+.replaybar .btn.on { box-shadow: inset 0 0 0 2px var(--brass); }
+.replaybar input[type=range] { flex: 1; accent-color: var(--brass); }
+.replaybar .rb-turn { min-width: 74px; font-variant-numeric: tabular-nums; font-size: 12px; }
+.replaybar .k { color: var(--glass-muted); }
+.replaypanel { position: fixed; left: 26px; top: 50%; transform: translateY(-50%); z-index: 6; width: 300px; max-height: 46vh; overflow: auto; pointer-events: auto;
+  border: 2px solid var(--glass-border); border-radius: 8px; background: rgba(28, 22, 16, .55); color: var(--glass-text); padding: 6px 8px; text-shadow: var(--glass-shadow); font-size: 11.5px; }
+.replaypanel .rp-head { font-weight: 600; margin-bottom: 4px; }
+/* 回放时左上的动态广播不更新（决策栏代替），收起来免得和决策栏叠在一起 */
+.replaying .feed { display: none; }
+.replaypanel .k { color: var(--glass-muted); font-weight: 400; }
+.replaypanel ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.replaypanel li { cursor: pointer; padding: 3px 6px; border-radius: 4px; border: 1px solid transparent; line-height: 1.45; }
+.replaypanel li:hover { background: rgba(255, 246, 225, .1); }
+.replaypanel li.on { border-color: var(--brass); background: rgba(255, 216, 77, .14); }
+.replaypanel .t { color: var(--brass); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.replaypanel .w, .replaypanel .r, .replaypanel .m { color: var(--glass-muted); margin-left: 4px; }
+.replaypanel .m { display: block; }
+.replaypanel .o { display: block; }
+.replaypanel .o.got, .replaypanel .o.home { color: #9BEBB3; }
+.replaypanel .o.lost, .replaypanel .o.invalid, .replaypanel .o.failed { color: #FFA3B0; }
+.replaypanel .o.abandoned, .replaypanel .o.guard { color: #FFE38F; }
+
 /* 决策复盘时间线 / 经验（批次 6 harness） */
 .endcard .timeline { margin: 8px 0 4px; }
 .endcard .timeline > summary { cursor: pointer; font-weight: 600; font-size: 13px; }

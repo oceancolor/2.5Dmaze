@@ -137,6 +137,24 @@ const MIGRATIONS = [
      updated_at INTEGER NOT NULL,
      PRIMARY KEY (user_id, scope)
    );`,
+  // v6 WorkBuddy 上场（批次 7）：MCP 令牌（只存哈希，每人一把有效的）与服务器自留的复盘摘要（不对玩家开放）
+  `CREATE TABLE mcp_tokens (
+     token_hash  TEXT PRIMARY KEY,
+     user_id     TEXT NOT NULL REFERENCES users(id),
+     hint        TEXT NOT NULL,
+     created_at  INTEGER NOT NULL,
+     last_used_at INTEGER,
+     revoked     INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE INDEX mcp_tokens_by_user ON mcp_tokens(user_id);
+   CREATE TABLE agent_notes (
+     match_id   TEXT PRIMARY KEY,
+     user_id    TEXT NOT NULL REFERENCES users(id),
+     agent      TEXT NOT NULL,
+     digest     TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX agent_notes_by_user ON agent_notes(user_id, created_at);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -212,6 +230,13 @@ export async function openStore(path = ':memory:') {
     putMemory: db.prepare(`INSERT INTO memories (user_id, scope, text, games, updated_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(user_id, scope) DO UPDATE SET text = excluded.text, games = excluded.games, updated_at = excluded.updated_at`),
     deleteMemory: db.prepare('DELETE FROM memories WHERE user_id = ? AND scope = ?'),
+    revokeMcp: db.prepare('UPDATE mcp_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0'),
+    insertMcp: db.prepare('INSERT INTO mcp_tokens (token_hash, user_id, hint, created_at) VALUES (?, ?, ?, ?)'),
+    mcpByHash: db.prepare('SELECT t.user_id, t.revoked, u.* FROM mcp_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?'),
+    mcpOf: db.prepare('SELECT hint, created_at, last_used_at FROM mcp_tokens WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1'),
+    touchMcp: db.prepare('UPDATE mcp_tokens SET last_used_at = ? WHERE token_hash = ?'),
+    insertNote: db.prepare('INSERT OR REPLACE INTO agent_notes (match_id, user_id, agent, digest, created_at) VALUES (?, ?, ?, ?, ?)'),
+    countNotes: db.prepare('SELECT COUNT(*) AS n FROM agent_notes WHERE user_id = ?'),
     recordById: db.prepare('SELECT jsonl_gz FROM match_records WHERE match_id = ?'),
     insertKey: db.prepare(`INSERT INTO keys (id, user_id, provider, base_url, model, reasoning, enc_key, iv, hint, created_at, last_used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`),
@@ -348,6 +373,41 @@ export async function openStore(path = ':memory:') {
     },
     deleteMemory(userId, scope) {
       return q.deleteMemory.run(userId, scope).changes > 0;
+    },
+
+    // ── WorkBuddy 上场：MCP 令牌（每人一把有效的，新建即作废旧的）与服务器自留复盘摘要 ──
+    putMcpToken(userId, tokenHash, hint, at) {
+      db.exec('BEGIN');
+      try {
+        q.revokeMcp.run(userId);
+        q.insertMcp.run(tokenHash, userId, hint, at);
+        db.exec('COMMIT');
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+    },
+    revokeMcpTokens(userId) {
+      return q.revokeMcp.run(userId).changes;
+    },
+    /** 有效令牌 → 用户；作废 / 不存在 → null。 */
+    userByMcpHash(tokenHash) {
+      const r = q.mcpByHash.get(tokenHash);
+      if (!r || r.revoked) return null;
+      return { id: r.user_id, kind: r.kind, nickname: r.nickname };
+    },
+    mcpTokenOf(userId) {
+      const r = q.mcpOf.get(userId);
+      return r ? { hint: r.hint, createdAt: r.created_at, lastUsedAt: r.last_used_at } : null;
+    },
+    touchMcpToken(tokenHash, at) {
+      q.touchMcp.run(at, tokenHash);
+    },
+    insertAgentNote(matchId, userId, agent, digest, at) {
+      q.insertNote.run(matchId, userId, agent, digest, at);
+    },
+    countAgentNotes(userId) {
+      return q.countNotes.get(userId).n;
     },
     close() {
       db.close();

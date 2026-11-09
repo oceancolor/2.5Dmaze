@@ -59,6 +59,30 @@ export const ART = {
       c: ['#1F432B', '#3E743E'],
       pine: ['#1B3F33', '#336A50'],
       bush: ['#2F5E35', '#5A9449'],
+      maple: ['#7E2416', '#E0552E'],
+      maple2: ['#8E4416', '#EE9032'],
+    },
+    // 场外大景（2026-11-09，tools/art/blender/town.py）：
+    //   东方古镇（参考图 1）：白灰墙 + 粗石 + 深色木构 + 深灰筒瓦；布篷 / 果蔬是广场上的亮色
+    //   童话村落（参考图 2）：奶油灰泥 + 深棕木骨架 + 橙红 / 蓝 / 紫屋顶 + 浅灰石城堡、紫尖顶
+    //   巨像遗迹（参考图 3，原创守林巨像）：铜绿 + 锈斑 + 琥珀眼光，苔藓盖顶
+    town: {
+      plaster_e: '#E7E1D3', plaster_w: '#EADBB9',
+      stone_e: ['#BDB5A6', '#958C7D'],
+      castle: ['#C4BBA8', '#9E9481'],
+      wood_e: '#3E2C21', wood_e2: '#6B4A33', timber_w: '#4E3324', door_w: '#7A4A2E',
+      tile_e: '#5A6270', tile_e_hi: '#79828F',
+      moss: ['#355E2C', '#6E9E46'],
+      cloth: ['#C9553E', '#3E8A87', '#D9A23E', '#7B5C9C'],
+      produce: ['#EE8A2A', '#CE3D2E', '#86B44A', '#EBCB4C'],
+      roof_w: { a: '#D2683E', b: '#3E7EAA', c: '#7E5AAC' },
+      shutter: ['#3E7E6A', '#B4523F', '#4E6FA0'],
+      spire: '#7652B2',
+      folk: ['#C9553E', '#3E7EAA', '#E0B04A', '#5E8F4A', '#8A5AA0', '#E9E2D4'],
+      skin: '#F0C8A0', hair: '#3A2A20', straw: '#D8B66E',
+      water: '#86D0E4',
+      van: '#E6E2D6', car: '#5DB7AC', rust: '#9A5A34',
+      patina: ['#4F9C8A', '#93D0B8'], bronze: '#6C7A5C', eye: '#FFC45A',
     },
     sheen: '#B9D4B2',
     trunk: '#6A4A36',

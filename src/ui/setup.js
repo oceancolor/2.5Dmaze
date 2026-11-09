@@ -143,6 +143,7 @@ const MODES = [
   { id: 'manual', title: '自己手打', desc: '方向键 / WASD 每回合走一步，AI 等你；按住连走。' },
   { id: 'script', title: '编写 Agent 脚本', desc: '写脚本（或交给你的 agent 写）替你打完一整局；人和 agent 用同一套接口、同一份信息。' },
   { id: 'byok', title: '接入大模型', desc: '选一个大模型，按你写的思路代打；经游戏服务器中转，费用由你的服务商账户承担。' },
+  { id: 'workbuddy', title: 'WorkBuddy 上场', desc: '把游戏作为 MCP 连接器接进 WorkBuddy：在 WorkBuddy 的任务会话里下棋、看复盘，用的是它自己的模型。' },
 ];
 
 const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
@@ -192,7 +193,7 @@ const VERIFY = {
   unverifiable: '<b class="warn">? 无法校验</b>',
 };
 const CHANNEL = { manual: '手打', script: '脚本', 'prompt-mock': '提示词·模拟', 'prompt-proxy': '提示词·大模型' };
-const channelOf = (tag) => CHANNEL[tag] || (tag.startsWith('byok:') ? `我的大模型·${tag.slice(5).split('/').pop()}` : tag);
+const channelOf = (tag) => CHANNEL[tag] || (tag === 'mcp:workbuddy' ? 'WorkBuddy 上场' : tag.startsWith('byok:') ? `我的大模型·${tag.slice(5).split('/').pop()}` : tag);
 const STATUS = { escaped: '到达', failed: '出局' };
 const TARGET_ZH = { gem: '宝石', chest: '宝箱', exit: '出口' };
 
@@ -212,7 +213,7 @@ function historyView(r) {
   }
   if (!r.items.length) return '<span class="k">还没有记录。打完一局会自动上传，服务器用同一个内核逐回合重放校验。</span>';
   const anyByok = r.items.some((m) => m.seats[0] && String(m.seats[0].tag).startsWith('byok:'));
-  return `<table class="hist"><tr><th>时间</th><th>种子</th><th>回合</th><th>规格 · 视野</th><th>你</th><th>名次 / 分数</th><th>校验</th>${anyByok ? '<th>AI 对话</th>' : ''}</tr>${r.items.map((m) => {
+  return `<table class="hist"><tr><th>时间</th><th>种子</th><th>回合</th><th>规格 · 视野</th><th>你</th><th>名次 / 分数</th><th>校验</th>${anyByok ? '<th>AI 对话</th>' : ''}<th>回放</th></tr>${r.items.map((m) => {
     const me = m.ranking.find((x) => x.seat === 0) || {};
     const tag = m.seats[0] ? m.seats[0].tag : '';
     // 接大模型模式的对局：从服务器对话日志下载这局的全部请求 / 回复 + 每次决策的结局（2026-11-05 批次 1）
@@ -220,7 +221,8 @@ function historyView(r) {
     const vis = m.vision && VISION_PRESETS[m.vision] ? VISION_PRESETS[m.vision].label.replace('（现行）', '') : '—';
     return `<tr><td>${when(m.endedAt || m.receivedAt)}</td><td>${esc(m.seed)}</td><td>${m.turns}</td><td>${esc(m.mapSize || '—')} · ${esc(vis)}</td><td>${esc(channelOf(tag))}</td>
       <td>${me.place ?? '–'} 名 · ${me.score ?? '–'} 分 · ${esc(STATUS[me.status] || me.status || '')}</td>
-      <td title="${esc(m.verifyNote || '')}">${VERIFY[m.verify] || esc(m.verify)}</td>${anyByok ? `<td>${talk}</td>` : ''}</tr>`;
+      <td title="${esc(m.verifyNote || '')}">${VERIFY[m.verify] || esc(m.verify)}</td>${anyByok ? `<td>${talk}</td>` : ''}
+      <td>${m.verify === 'verified' ? `<button class="btn mini" data-a="histreplay" data-id="${esc(m.matchId)}" title="在游戏画面里重新播一遍这局">回放</button>` : ''}</td></tr>`;
   }).join('')}</table>${r.total > r.items.length ? `<p class="k">共 ${r.total} 局，显示最近 ${r.items.length} 局</p>` : ''}<p class="k" data-k="histnote"></p>`;
 }
 
@@ -232,7 +234,7 @@ function historyView(r) {
  *   llm.call：带游客令牌的服务器请求（sync.call），模式 B 的 key 管理 / 测试连接 / 用量
  *   scripts：{library, load(id) → {code,name,author,origin}, evaluate(opts) → {result, markdown}}（脚本库与整局试跑）
  */
-export function createSetup(root, { probe, trial, onStart, onResume, history, llm, scripts = null }) {
+export function createSetup(root, { probe, trial, onStart, onResume, onReplay = null, history, llm, scripts = null }) {
   let s = loadSetup();
   let proxy = { ok: false, error: '未检测' };
   let probed = false;
@@ -251,6 +253,8 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
   };
   // 思路试跑 / A/B（批次 6 P3）
   const trialState = { games: 5, size: 'XS', ab: false, bText: '', bThinking: '', busy: false, stop: null, html: '' };
+  // WorkBuddy 上场（批次 7）：令牌明文只在刚生成时留在内存里（fresh），不进 localStorage
+  const wb = { info: null, note: '', fresh: null, size: 'XS', strategy: '' };
   const strategyLib = createStrategyLibrary();
 
   async function loadHistory() {
@@ -284,6 +288,7 @@ export function createSetup(root, { probe, trial, onStart, onResume, history, ll
   function detail() {
     const p = s.player;
     if (p.mode === 'byok') return byokDetail();
+    if (p.mode === 'workbuddy') return workbuddyDetail();
     if (p.mode === 'manual') {
       return `<div class="row"><label>方向映射</label><select data-f="mapping">${Object.entries(MAPPINGS).map(([k, m]) => opt(k, m.label, s.mapping)).join('')}</select></div>
         <p class="k">等距视角下箭头键没有「正上方」的网格方向，只能二选一地转 45°（SPEC O7，灰盒 A/B）。Q / E / C / Z 永远是屏幕斜向：左上 / 右上 / 右下 / 左下。空格原地等一回合。</p>`;
@@ -584,6 +589,55 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       </details>`;
   }
 
+  // ───────── WorkBuddy 上场（批次 7）─────────
+
+  function workbuddyDetail() {
+    const w = wb;
+    if (w.note) return `<p class="k">${w.note}</p>`;
+    if (!w.info) return '<p class="k">读取中…</p>';
+    const t = w.info.token;
+    const cfgText = w.fresh ? JSON.stringify(w.fresh.config, null, 2) : '';
+    const prompt = wbPrompt();
+    const active = w.info.active || [];
+    return `<h4>第 1 步 · 把游戏接进 WorkBuddy（一次性）</h4>
+      <p class="k">生成一个 MCP 令牌，把下面的配置粘贴到 WorkBuddy 桌面端「连接器（插件）→ 自定义连接器 / MCP 服务器 → 配置 MCP」里（保留已有的其他服务），保存后在连接器页启用 / 信任「maze-treasure」。地址：<code>${esc(w.info.url)}</code>${/127\.0\.0\.1|localhost/.test(w.info.url) ? '（本机地址：WorkBuddy 要和游戏服务器在同一台电脑上）' : ''}</p>
+      <div class="row"><span class="k">${t ? `当前令牌 <code>${esc(t.hint)}</code> · ${t.lastUsedAt ? `最近使用 ${new Date(t.lastUsedAt).toLocaleString()}` : '还没被使用过'}` : '还没有令牌'}</span><span class="sp"></span>
+        <button class="btn" data-a="wbtoken">${t ? '重新生成（旧的作废）' : '生成令牌'}</button>${t ? '<button class="btn mini" data-a="wbrevoke">作废</button>' : ''}</div>
+      ${w.fresh ? `<p class="warn">令牌只显示这一次，复制后请勿外传（它能以你的身份在游戏里开局）。</p>
+        <pre class="prompt" data-k="wbcfg">${esc(cfgText)}</pre>
+        <div class="row"><span class="sp"></span><span class="k" data-k="wbcfgnote"></span><button class="btn" data-a="wbcopycfg">复制配置</button></div>` : ''}
+      <h4>第 2 步 · 在 WorkBuddy 的任务会话里开一局</h4>
+      <div class="row"><label>地图</label><select data-f="wbsize">${MAP_SIZE_IDS.map((id) => opt(id, MAP_SIZES[id].label, w.size)).join('')}</select>
+        <span class="k">建议先用 XS（十来个决策点就打完）；对手是 3 个「预判对手」脚本。</span></div>
+      <textarea class="persona" data-f="wbstrategy" rows="3" maxlength="2000" placeholder="你的思路（可选），会一起交给 WorkBuddy">${esc(w.strategy)}</textarea>
+      <pre class="prompt" data-k="wbprompt">${esc(prompt)}</pre>
+      <div class="row"><span class="sp"></span><span class="k" data-k="wbpromptnote"></span><button class="btn brass" data-a="wbcopyprompt">复制提示词</button></div>
+      <p class="k">粘贴到 WorkBuddy 新建的任务会话里发送即可。WorkBuddy 每到一个决策点会自己推理（可以先查距离），再提交决定；游戏停在决策点等它，不限时间。打完的对局由服务器校验后记进下面的「我的战绩」，标为「WorkBuddy 上场」；也可以直接让 WorkBuddy 调用 maze_replay 给你复盘。WorkBuddy 自己的记忆由它自己管理。</p>
+      ${active.length ? `<p class="k">进行中：${active.map((a) => `${esc(a.gameId.slice(0, 8))}…（${esc(a.size)}，第 ${a.turn} 回合）`).join('、')} · 在 WorkBuddy 里说「继续」即可接着打（服务器重启会丢失未完成的对局）</p>` : ''}
+      <p class="k">这种玩法不经过「开始对局」按钮：对局在游戏服务器上进行，用的是 WorkBuddy 自己的模型与积分。</p>`;
+  }
+
+  function wbPrompt() {
+    return [
+      `用 maze-treasure 连接器帮我打一局「迷宫寻宝」，地图 ${wb.size}。`,
+      '先调用 maze_new_game，仔细读规则和决策契约；然后每到一个决策点，认真推理（看博弈事实表里的 lead、对手的 heading 和 spare、本局到目前为止的结局）后调用 maze_decide。',
+      '一直打到对局结束，中途不要停下来问我。结束后向我汇报名次和分数，再用 maze_replay 复盘：哪些决策好、哪些亏了、下一局怎么改，并把经验记在你自己的记忆里。',
+      wb.strategy.trim() ? `我的思路：${wb.strategy.trim()}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  async function loadWorkbuddy() {
+    if (!llm) return;
+    const r = await llm.call('GET', '/api/v1/mcp');
+    if (r.status === 0) wb.note = r.reason === 'static' ? '当前是静态预览（没有游戏服务器）。WorkBuddy 上场需要游戏服务器：请用 <code>npm run play</code> 启动。' : '连不上游戏服务器。';
+    else if (r.status !== 200) wb.note = `读取失败：${esc(callErr(r))}`;
+    else {
+      wb.note = '';
+      wb.info = r.json;
+    }
+    paintK('detail', detail());
+  }
+
   // ───────── 思路库 + 思路试跑（批次 6 P3）─────────
 
   function trialEstimate() {
@@ -743,7 +797,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       <section><h3>你怎么玩</h3>
         <div class="modes">${MODES.map((m) => `<button class="choice${p.mode === m.id ? ' on' : ''}" data-mode="${m.id}">
           <b>${m.title}</b><span>${m.desc}</span></button>`).join('')}</div>
-        <div class="detail">${detail()}</div>
+        <div class="detail" data-k="detail">${detail()}</div>
       </section>
       <section><h3>地图大小</h3>
         <div class="modes sizes">${MAP_SIZE_IDS.map((id) => {
@@ -804,6 +858,25 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       render();
       autoProbe();
       if (s.player.mode === 'byok') loadByok();
+      if (s.player.mode === 'workbuddy') loadWorkbuddy();
+    } else if (b.dataset.a === 'wbtoken') {
+      if (wb.info && wb.info.token && !confirm('重新生成后，WorkBuddy 里旧的配置立即失效，需要换成新令牌。继续？')) return;
+      const r = await llm.call('POST', '/api/v1/mcp/token', {});
+      if (r.status === 201) {
+        wb.fresh = r.json;
+        await loadWorkbuddy();
+      } else paintK('detail', `<p class="bad">生成失败：${esc(callErr(r))}</p>${workbuddyDetail()}`);
+    } else if (b.dataset.a === 'wbrevoke') {
+      if (!confirm('作废后 WorkBuddy 连不上游戏，需要重新生成令牌。继续？')) return;
+      await llm.call('DELETE', '/api/v1/mcp/token');
+      wb.fresh = null;
+      await loadWorkbuddy();
+    } else if (b.dataset.a === 'wbcopycfg' && wb.fresh) {
+      const ok = await copyText(JSON.stringify(wb.fresh.config, null, 2));
+      paintK('wbcfgnote', ok ? '<b class="ok">已复制</b>' : '<b class="bad">复制失败</b>');
+    } else if (b.dataset.a === 'wbcopyprompt') {
+      const ok = await copyText(wbPrompt());
+      paintK('wbpromptnote', ok ? '<b class="ok">已复制</b>，粘贴到 WorkBuddy 的任务会话' : '<b class="bad">复制失败</b>');
     } else if (b.dataset.thinking && isThinking(b.dataset.thinking)) {
       set(() => { s.player.thinking = b.dataset.thinking; });
       root.querySelectorAll('[data-thinking]').forEach((x) => x.classList.toggle('on', x === b));
@@ -953,6 +1026,11 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
         libNote = `已删除「${esc(e.name)}」`;
         render();
       }
+    } else if (b.dataset.a === 'histreplay' && onReplay) {
+      b.disabled = true;
+      paintK('histnote', '<span class="k">读取记录…</span>');
+      await onReplay(b.dataset.id);
+      b.disabled = false;
     } else if (b.dataset.a === 'histtalk' && llm) {
       const id = b.dataset.id;
       const note = (html) => paintK('histnote', html);
@@ -977,6 +1055,11 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       await loadHistory();
     } else if (b.dataset.a === 'start') {
       error = '';
+      if (s.player.mode === 'workbuddy') {
+        error = 'WorkBuddy 上场的对局在 WorkBuddy 的任务会话里进行：复制上面的提示词粘贴过去即可；想在这里玩请换一种玩法';
+        render();
+        return;
+      }
       if (s.player.mode === 'byok' && !s.player.keyId) {
         error = byok.note ? '接入大模型需要游戏服务器（npm run play）' : '先在「接入我的大模型」里添加并选择一个模型';
         render();
@@ -996,6 +1079,11 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     else if (f === 'brief') set(() => { s.player.brief = e.target.value; });
     else if (f === 'trialbtext') trialState.bText = e.target.value;
     else if (f === 'sbrief') set(() => { s.player.strategyBrief = e.target.value; });
+    else if (f === 'wbstrategy') {
+      wb.strategy = e.target.value;
+      const pre = root.querySelector('[data-k="wbprompt"]');
+      if (pre) pre.textContent = wbPrompt();
+    }
     else if (f === 'persona') {
       set(() => { s.player.persona = e.target.value; });
       const c = root.querySelector('[data-k="count"]');
@@ -1038,6 +1126,10 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       }
       if (f === 'trialbthink') trialState.bThinking = t.value;
       paintK('trialest', trialEstimate());
+    } else if (f === 'wbsize' && isMapSize(t.value)) {
+      wb.size = t.value;
+      const pre = root.querySelector('[data-k="wbprompt"]');
+      if (pre) pre.textContent = wbPrompt();
     } else if (f === 'trialbsel' && t.value) {
       const e = strategyLib.get(t.value);
       if (e) {
@@ -1110,6 +1202,7 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
       autoProbe();
       loadHistory();
       if (s.player.mode === 'byok') loadByok();
+      if (s.player.mode === 'workbuddy') loadWorkbuddy();
     },
     hide() {
       root.hidden = true;

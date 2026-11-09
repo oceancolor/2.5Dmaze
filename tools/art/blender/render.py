@@ -64,7 +64,7 @@ for i, dc in enumerate(decos):
     log('TILE', f'DECO{i + 1:02d}', json.dumps({'top': t, 'left': l, 'right': r}))
 hold_exit = M.holdout_plane('HoldExit', hole=M._squircle(M.EXIT_R[0]))
 hold_flat = M.holdout_plane('HoldFlat')
-envs = [(f'ENV_{s["key"]}_na_00', M.build_env(s, P)) for s in M.ENV_SPECS]
+envs = [(f'ENV_{s["key"]}_na_00', M.build_env(s, P)) for s in M.all_env_specs()]
 cliffs = [(f'ENV_CLIFF_{k}{v + 1:02d}_na_00', M.build_cliff(k, v, P)) for k in M.CLIFF_KINDS for v in range(M.CLIFF_VARIANTS)]
 cliffs.append(('ENV_CLIFF_S_na_00', M.build_cliff('S', 0, P)))
 log('FIT', 'CLIFF', json.dumps({'px': M.CLIFF_PX, 'z': round(M.CLIFF_Z, 4)}))
@@ -97,6 +97,12 @@ if ONLY and os.path.exists(index_path):
 
 def want(name):
     return not ONLY or any(name.startswith(p) for p in ONLY)
+
+
+# 已下线的场外件（规格表里删掉的）从索引里清掉，免得旧图还被打进图集
+_env_names = {n for n, _ in envs} | {n for n, _ in cliffs}
+for _n in [n for n in index if n.startswith('ENV_') and n not in _env_names]:
+    index.pop(_n)
 
 
 def want_group(prefix):

@@ -18,7 +18,7 @@ export const CLIFF = 28;
 /** 前方布景最多盖住土崖的下 40%：上面（草皮卷边 + 两层地层）始终露出来。 */
 const CLIFF_SHOW = Math.round(CLIFF * 0.6);
 /** 林带半径（格）。 */
-const RING = 14;
+const RING = 20; // 2026-11-09 大景离地图更远（到 ~250 px），林带放宽，不然小图上大景外面就是空底色
 /** 低于这个缩放比就整圈烘焙（近景逐件画太贵）。 */
 export const BAKE_BELOW = 0.45;
 
@@ -32,24 +32,51 @@ const NEAR = [['BUSH01', 34], ['BUSH02', 24], ['ROCK01', 6], ['TREE03', 25], [nu
 const FOOT = [['BUSH01', 50], ['BUSH02', 35], ['ROCK01', 15]];
 
 /**
- * 地标：样张页（20×20、1280×720）的屏幕坐标换算成「相对该边中点的世界偏移」，簇内布局原样保留，
- * 整簇锚到左上 / 右上边的中点 —— 20×20 时落在顶角两侧，128×128 时落在长边中段，不会全挤在顶角。
- * 每项：[名, 簇内 dx, 簇内 dy]（dy 为负 = 往边外推）。
+ * 场外大景（2026-11-09，按用户参考图重做，模型见 tools/art/blender/town.py）：三处，都在后方（不压地图）。
+ *   左上边中点：东方古镇（望楼、白墙灰瓦民居、集市摊位、红枫、赶集的人、手推车）—— 参考图「建筑尺度与风格 1」
+ *   右上边中点：童话村落（紫尖顶城堡、木骨架彩顶房、村民）—— 参考图「建筑尺度与风格 2」
+ *   顶角外：守林巨像遗迹（半埋的巨像头 + 巨手 + 废弃车辆 + 游人）—— 参考图「雕塑尺度 1」
+ * 坐标：[名, u, v]：u 沿该边（往顶角为正）、v 往边外（离地图越远越大），单位世界 px；顶角那一簇 u = 横向、v = 往上。
+ * 比例：点缀人物身高 ≈ 21 px，民居 ≈ 4–5 人高、望楼 ≈ 10 人高、巨像头 ≈ 10 人高（参考图的比例）。
  */
-const MARK_CLUSTER = [
-  // 左上边（x<0 一侧）
-  ['TOWER01', -70, -10], ['STONES01', -24, -90], ['CABIN01', 40, -80], ['JADE01', 120, -120], ['STONES02', 160, -154],
-  // 右上边（y<0 一侧）
-  ['STONES01', -200, -140], ['JADE02', -140, -126], ['CABIN02', -50, -82], ['STONES02', 25, -50], ['TOWER01', 190, 36],
-];
-/** 林间空地（相对簇心的椭圆 rx, ry）：里面的树约 1/3 换成灌木 / 石块，其余清掉。 */
-const CLEARING_REL = [
-  [40, -78, 150, 68], [-88, -96, 132, 60], [190, 32, 50, 26],
-];
-const GLOW_RGB = [126, 240, 200];
+const TOWN = {
+  east: [
+    ['TOWERE', -40, 175], ['HOUSEE1', 110, 128], ['HOUSEE2', -185, 112], ['MAPLE01', 205, 190], ['MAPLE02', -280, 160], ['MAPLE01', 25, 250],
+    ['STALL01', -70, 78], ['STALL02', 8, 86], ['STALL03', -135, 62], ['CART01', 62, 58],
+    ['FOLK01', -95, 44], ['FOLK03', -32, 52], ['FOLK05', 28, 40], ['FOLK02', 84, 82], ['FOLK04', -150, 90], ['FOLK06', 128, 64],
+    ['FOLK03', -8, 120], ['FOLK01', 60, 118], ['FOLK02', -210, 66], ['FOLK05', 166, 100], ['FOLK04', -60, 128],
+    // 后排再起两三栋，读作「一座镇子」而不是一个广场
+    ['HOUSEE2', -265, 235], ['HOUSEE1', 150, 250], ['HOUSEE2', 300, 215], ['MAPLE02', -150, 250],
+  ],
+  west: [
+    ['CASTLE', 30, 215], ['HOUSEW1', -120, 120], ['HOUSEW2', 160, 116], ['HOUSEW3', -15, 100], ['MAPLE02', -230, 170], ['TREE01', 250, 180],
+    ['CART01', 82, 58], ['FOLK06', -70, 52], ['FOLK02', -20, 44], ['FOLK05', 40, 70], ['FOLK03', 120, 60], ['FOLK01', -160, 74], ['FOLK04', 190, 82],
+    ['HOUSEW2', -235, 225], ['HOUSEW1', 215, 245], ['HOUSEW3', 300, 170],
+  ],
+  giant: [
+    ['GIANTHEAD', -40, 250], ['GIANTHAND', 175, 150], ['VAN01', -225, 130], ['CAR01', 70, 98],
+    ['FOLK02', -10, 118], ['FOLK06', 18, 110], ['FOLK05', -60, 104], ['FOLK01', 130, 96], ['FOLK03', -160, 92],
+  ],
+};
+/** 空地（同一套 u / v，椭圆 ru × rv，沿边方向展开）：里面的树约 1/3 换成灌木 / 石块，其余清掉；地面按 tone 铺色。 */
+const TOWN_CLEARINGS = {
+  east: [[-40, 95, 250, 85, 'plaza'], [-40, 175, 70, 45, 'plaza']],
+  west: [[20, 110, 230, 80, 'path'], [30, 215, 80, 50, 'path']],
+  giant: [[-10, 165, 270, 120, 'meadow']],
+};
+const GROUND = { plaza: [205, 196, 176], path: [176, 148, 104], meadow: [96, 140, 74], forest: [74, 104, 60] };
+/** 发光：[名, 光色, 高度系数（0 = 落地点、1 = 剪影顶）, 半径系数]。巨像的琥珀眼在暗角之上透出来。 */
+const GLOWS = { GIANTHEAD: [[255, 196, 90], 0.42, 0.6] };
 
-/** 两簇的锚点：左上边 / 右上边的中点（菱形顶点 → 左右顶点）。 */
-const anchors = (size) => [[-size * HALF_W / 2, size * HALF_H / 2], [size * HALF_W / 2, size * HALF_H / 2]];
+/** 三簇的局部坐标系：原点、沿边方向 e、往外方向 o（世界 px，单位向量）。 */
+function frames(size) {
+  const s5 = Math.sqrt(5);
+  return {
+    east: { o: [-size * HALF_W / 2, size * HALF_H / 2], e: [2 / s5, -1 / s5], n: [-1 / s5, -2 / s5] },
+    west: { o: [size * HALF_W / 2, size * HALF_H / 2], e: [-2 / s5, -1 / s5], n: [1 / s5, -2 / s5] },
+    giant: { o: [0, 0], e: [1, 0], n: [0, -1] },
+  };
+}
 
 function pickWeighted(table, u) {
   const total = table.reduce((s, [, w]) => s + w, 0);
@@ -130,18 +157,34 @@ export function buildPlan(size, boxOf) {
   }
 
   const order = (p, q) => p.depth - q.depth || p.wx - q.wx;
-  const [A0, A1] = anchors(N);
+  const F = frames(N);
+  const place = (f, u, v) => [f.o[0] + f.e[0] * u + f.n[0] * v, f.o[1] + f.e[1] * u + f.n[1] * v];
   const marks = [];
-  MARK_CLUSTER.forEach(([k, dx, dy], i) => {
-    const a = i < 5 ? A0 : A1;
-    const wx = a[0] + dx;
-    const wy = a[1] + dy;
-    marks.push({ name: envName(k), wx, wy, depth: (wy - CLIFF - 2 * HALF_H) / (2 * HALF_H) });
-  });
-  const clearings = CLEARING_REL.map(([dx, dy, rx, ry], i) => {
-    const a = i < 2 ? A0 : A1;
-    return [a[0] + dx, a[1] + dy, rx, ry];
-  });
+  for (const [cl, list] of Object.entries(TOWN)) {
+    for (const [k, u, v] of list) {
+      const [wx, wy] = place(F[cl], u, v);
+      const name = envName(k);
+      let ok = null;
+      try {
+        ok = boxOf(name);
+      } catch {
+        ok = null;
+      }
+      if (!ok) continue; // 图集里没有（旧图集 / 还没出图）就跳过
+      marks.push({ name, wx, wy, depth: (wy - CLIFF - 2 * HALF_H) / (2 * HALF_H), glow: GLOWS[k] || null });
+    }
+  }
+  // 空地：沿边展开的椭圆 → 近似成世界轴向椭圆（rx 取沿边投影，ry 取等距压扁后的高度）
+  const clearings = [];
+  for (const [cl, list] of Object.entries(TOWN_CLEARINGS)) {
+    const f = F[cl];
+    for (const [u, v, ru, rv, tone] of list) {
+      const [cx, cy] = place(f, u, v);
+      const rx = Math.hypot(f.e[0] * ru, f.n[0] * rv);
+      const ry = Math.hypot(f.e[1] * ru, f.n[1] * rv);
+      clearings.push([cx, cy, rx, ry, tone]);
+    }
+  }
 
   const overlap = (p, q, m) => {
     const a = boxOf(p.name);
@@ -161,7 +204,7 @@ export function buildPlan(size, boxOf) {
     back: [...kept, ...marks].sort(order),
     front: front.sort(order),
     cliffs,
-    glows: marks.filter((mk) => mk.name.startsWith('ENV_JADE')),
+    glows: marks.filter((mk) => mk.glow),
     clearings,
   };
 }
@@ -189,6 +232,24 @@ function drawItem(ctx, atlas, it, s, ox, oy, b, makeCanvas) {
   const dy = it.wy * s + oy;
   ctx.drawImage(shadowSprite(makeCanvas), dx - rx, dy - 2 * s - rx * 0.5, rx * 2, rx);
   atlas.draw(ctx, it.name, s, dx, dy, { mode: 'raw' });
+}
+
+/** 空地地面：广场铺石 / 村道土色 / 草甸，柔边椭圆。cl = [cx, cy, rx, ry, tone]。 */
+function drawClearing(ctx, cl, s, ox, oy) {
+  const [cx, cy, rx, ry, tone] = cl;
+  const [r0, g0, b0] = GROUND[tone] || GROUND.forest;
+  const a = tone === 'plaza' ? 0.62 : tone === 'path' ? 0.5 : 0.45;
+  const r = rx * 1.15 * s;
+  ctx.save();
+  ctx.translate(cx * s + ox, cy * s + oy);
+  ctx.scale(1, ry / rx);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+  g.addColorStop(0, `rgba(${r0},${g0},${b0},${a})`);
+  g.addColorStop(0.62, `rgba(${r0},${g0},${b0},${a * 0.62})`);
+  g.addColorStop(1, `rgba(${r0},${g0},${b0},0)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(-r, -r, r * 2, r * 2);
+  ctx.restore();
 }
 
 /** 沿菱形两条边画一道暗带（后沿暗晕 / 崖脚落地影）。 */
@@ -277,19 +338,7 @@ export function createEnvScene({ atlas, size, makeCanvas = (w, h) => { const c =
       const c = makeCanvas(w, h);
       const x = c.getContext('2d');
       if (which === 'back') {
-        for (const [cx, cy, rx, ry] of p.clearings) {
-          const r = rx * 1.15 * s;
-          x.save();
-          x.translate(cx * s + ox, cy * s + oy);
-          x.scale(1, ry / rx);
-          const g = x.createRadialGradient(0, 0, 0, 0, 0, r);
-          g.addColorStop(0, 'rgba(74,104,60,0.5)');
-          g.addColorStop(0.6, 'rgba(74,104,60,0.28)');
-          g.addColorStop(1, 'rgba(74,104,60,0)');
-          x.fillStyle = g;
-          x.fillRect(-r, -r, r * 2, r * 2);
-          x.restore();
-        }
+        for (const cl of p.clearings) drawClearing(x, cl, s, ox, oy);
         for (const it of p.back) drawItem(x, atlas, it, s, ox, oy, atlas.box(it.name), makeCanvas);
         drawBand(x, size, s, ox, oy, 'back', 16, 0.6, -2);
       } else {
@@ -322,18 +371,8 @@ export function createEnvScene({ atlas, size, makeCanvas = (w, h) => { const c =
         return 1;
       }
       let ops = 1;
-      for (const [cx, cy, rx, ry] of p.clearings) {
-        const r = rx * 1.15 * s;
-        ctx.save();
-        ctx.translate(cx * s + ox, cy * s + oy);
-        ctx.scale(1, ry / rx);
-        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-        g.addColorStop(0, 'rgba(74,104,60,0.5)');
-        g.addColorStop(0.6, 'rgba(74,104,60,0.28)');
-        g.addColorStop(1, 'rgba(74,104,60,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(-r, -r, r * 2, r * 2);
-        ctx.restore();
+      for (const cl of p.clearings) {
+        drawClearing(ctx, cl, s, ox, oy);
         ops++;
       }
       ops += items(ctx, p.back, s, ox, oy, W, H);
@@ -384,12 +423,13 @@ export function createEnvScene({ atlas, size, makeCanvas = (w, h) => { const c =
         diamondPath(ctx, size, s, ox, oy);
         ctx.clip('evenodd');
         ctx.globalCompositeOperation = 'screen';
-        const c = (a) => `rgba(${GLOW_RGB.join(',')},${a})`;
         for (const it of p.glows) {
+          const [rgb, hk, rk] = it.glow;
+          const c = (a) => `rgba(${rgb.join(',')},${a})`;
           const b = atlas.box(it.name);
           const cx = it.wx * s + ox;
-          const cy = it.wy * s + oy - b.t * 0.55 * s;
-          const r = Math.max(4, b.t * 1.4 * s);
+          const cy = it.wy * s + oy - b.t * hk * s;
+          const r = Math.max(4, b.t * rk * s);
           const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
           g.addColorStop(0, c(0.26));
           g.addColorStop(0.4, c(0.1));

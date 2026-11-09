@@ -140,7 +140,8 @@ export function createScheduler(cfg, seed, opts = {}) {
       if (!isWallFor(d)) return d;
       if (fromQueue || now >= bumpUntil) {
         bumpUntil = now + (skipAnim ? 0 : cfg.motion.bumpMs / speed);
-        emit('bump', { seat: playerSeat, dir: d, start: now, duration: bumpUntil - now });
+        const me = state.actors[playerSeat];
+        emit('bump', { seat: playerSeat, dir: d, start: now, duration: bumpUntil - now, x: me.x, y: me.y });
       }
       if (!fromQueue) return null;
     }

@@ -5,8 +5,10 @@
 //   layer = { sprite, dy, mode, alpha, desat, ghost } | { proc:'halo'|'beam'|'badge'|'text', ... }
 
 import { DIR_LETTERS } from './iso.js';
-import { GEM_KEYS, SEAT_KEYS, ACTOR_COLORS } from './palette.js';
+import { GEM_KEYS, SEAT_KEYS, ACTOR_COLORS, GEM_COLORS_BASE } from './palette.js';
 import { settledEntities, transitionEntities, moveBeat, HOP, LAND } from './scene.js';
+import { FX_DUR } from './fx.js';
+import { setsOf } from '../core/scoring.js';
 
 const pad2 = (n) => String(n).padStart(2, '0');
 
@@ -130,26 +132,47 @@ export function createAnimator({ map, cfg, playerSeat = 0 }) {
       const land = last.start + LAND * moveDurOf(last);
       const pick = M.pickMs / last.speed;
       fx = fx.filter((f) => f.start + f.dur > last.start);
+      const cues = []; // 音效提示（main 按 at 排进 WebAudio）：与特效同一时刻
+      const burst = (kind, x, y, seat, extra = {}) => {
+        const seed = ((last.n * 131 + x * 31 + y * 17 + seat * 7) | 0) >>> 0;
+        fx.push({ type: 'burst', kind, x, y, start: land, dur: pick * FX_DUR[kind], seed, ...extra });
+        cues.push({ type: kind, seat, x, y, at: land, ...extra });
+      };
       for (const e of last.events) {
         if (e.type === 'pickup') {
           actions[e.seat] = { state: 'PICK', start: land, dur: pick };
           fx.push({ type: 'gem', c: e.color, x: e.x, y: e.y, start: land, dur: pick });
+          const before = last.prev ? setsOf(last.prev.actors[e.seat].gems) : 0;
+          const after = last.next ? setsOf(last.next.actors[e.seat].gems) : 0;
+          burst(after > before ? 'set' : 'gem', e.x, e.y, e.seat, { color: GEM_COLORS_BASE[e.color], c: e.color });
         } else if (e.type === 'chest') {
           actions[e.seat] = { state: 'PICK', start: land, dur: pick };
           const text = e.kind === 'score' ? `+${e.value} 分` : `+${e.gained} 体力`;
           fx.push({ type: 'chest', x: e.x, y: e.y, start: land, dur: pick * 2.2, text, kind: e.kind });
+          burst(e.kind === 'score' ? 'chestScore' : 'chestStamina', e.x, e.y, e.seat);
+        } else if (e.type === 'escaped' && last.next) {
+          const a = last.next.actors[e.seat];
+          burst('escape', a.x, a.y, e.seat, { color: ACTOR_COLORS[e.seat] });
+        } else if (e.type === 'failed' && last.next) {
+          const a = last.next.actors[e.seat];
+          burst('fail', a.x, a.y, e.seat);
         }
       }
       // 本回合动了的角色，旧的拾取演出作废（移动优先）
       for (let i = 0; i < n; i++) {
         if (last.moved[i] && actions[i] && actions[i].start < last.start) actions[i] = null;
       }
+      return cues;
     },
 
-    /** 调度器 'bump'（手动输入朝墙，本地反馈，不进回合）。 */
+    /** 调度器 'bump'（手动输入朝墙，本地反馈，不进回合）。返回音效提示。 */
     onBump(b) {
       facing[b.seat] = DIR_LETTERS[b.dir];
       actions[b.seat] = { state: 'BLOCK', start: b.start, dur: Math.max(1, b.duration) };
+      if (b.x !== undefined && b.y !== undefined) {
+        fx.push({ type: 'burst', kind: 'bump', x: b.x, y: b.y, start: b.start, dur: Math.max(120, b.duration * FX_DUR.bump), seed: (b.start | 0) >>> 0 });
+      }
+      return [{ type: 'bump', seat: b.seat, at: b.start }];
     },
 
     /**
@@ -212,6 +235,14 @@ export function createAnimator({ map, cfg, playerSeat = 0 }) {
       for (const f of fx) {
         if (t < f.start || t >= f.start + f.dur) continue;
         const u = (t - f.start) / f.dur;
+        if (f.type === 'burst') {
+          items.push({
+            x: f.x, y: f.y, cells: [[f.x, f.y]], order: 4,
+            layers: [{ proc: 'burst', kind: f.kind, u, seed: f.seed, color: f.color, quality }],
+            marker: null,
+          });
+          continue;
+        }
         if (f.type === 'gem') {
           const e = smooth(u);
           items.push({
