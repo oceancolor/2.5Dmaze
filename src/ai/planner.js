@@ -32,7 +32,7 @@ import { cheb } from '../core/geom.js';
 import { chooseTarget, stepToward, isAffordable } from './heuristic.js';
 import { buildPayload, checkContract, parsePlan, validatePlan } from './codec.js';
 import { createTracker, sessionText } from './harness.js';
-import { createDecisionLog } from './decision-protocol.js';
+import { createDecisionLog, sameRef } from './decision-protocol.js';
 import { buildPacket, trajectoryText } from './decision-packet.js';
 
 const L3_REASON = {
@@ -143,7 +143,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   const log = [];
   const stats = {
     requests: 0, repairs: 0, applied: 0, invalid: 0, rejected: 0, stale: 0, failed: 0, timeouts: 0,
-    events: 0, eventsSkipped: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0, queued: 0, abandons: 0,
+    events: 0, eventsSkipped: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0, queued: 0, abandons: 0, kept: 0,
   };
   const follow = { yes: 0, partial: 0, override: 0 };
   const deviations = [];
@@ -225,6 +225,11 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       return;
     }
     let result = r.plan;
+    // 续走（§14 C14）：必须有在执行、且请求时目标还在的计划；否则当作不合格，给一次重交机会
+    if (result.keep && !keepable(pending.payload)) {
+      reject(text, '现在没有在执行的计划可以续走（keep），请给出 targetType + target');
+      return;
+    }
     if (contract) {
       const c = checkContract(result, autonomy);
       if (!c.ok) {
@@ -236,6 +241,9 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     pending.status = 'done';
     pending.result = result;
   }
+
+  /** 当前计划能否续走：有计划，且目标在发请求时的局面里还在（出口总在）。 */
+  const keepable = (payload) => Boolean(plan && plan.target && (plan.targetType === 'exit' || validAtRequest(plan, payload)));
 
   function fail(id, reason, detail) {
     if (!pending || pending.id !== id || pending.status !== 'out') return;
@@ -265,17 +273,50 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     pending = null;
     const entry = { n: turn, seat, requestTurn: p.requestTurn, why: p.why, dp: p.dp, rev: p.rev };
     const k = turn - 1; // 决策基于的帧：第 turn-1 回合结算后的局面
-    const drop = () => { // 旧计划（还在执行的那个决策）被这次决策顶掉
+    // 旧计划（还在执行的那个决策）让位给这次决策：目标没变 = 续走（continued），换了目标 = 被替换（replaced）
+    const drop = (ref = null) => {
       if (!dlog.bound) return;
-      dlog.push('replaced', dlog.bound.dp, k, { by: p.dp });
+      dlog.push(ref && sameRef(ref, dlog.bound.ref) ? 'continued' : 'replaced', dlog.bound.dp, k, { by: p.dp });
       dlog.unbind();
     };
+    const source = p.kind === 'repair' ? 'llm-repair' : 'llm';
+    if (p.status === 'done' && p.result.keep) {
+      // 续走：目标 / then / abandonIf / 闸门状态原样保留，只换决策点编号
+      if (!plan || !planAlive(obs)) { // 交付时已查过；防御（例如 L > 0 的旧配置）
+        stats.invalid++;
+        invalidStreak++;
+        log.push({ ...entry, source: 'invalid', plan: null, err: '没有可续走的计划' });
+        note(turn, p, 'invalid', null, '没有可续走的计划');
+        dlog.push('invalid', p.dp, k, { rev: p.rev, why: '没有可续走的计划' });
+        drop();
+        plan = null;
+        queue = [];
+        lastFailTurn = turn;
+        return;
+      }
+      const ref = dlog.bound ? dlog.bound.ref : dlog.ref(plan.targetType, plan.target);
+      drop(ref);
+      plan = { ...plan, requestTurn: p.requestTurn, source, why: p.why, dp: p.dp };
+      dlog.push('applied', p.dp, k, { rev: p.rev, effectiveTurn: turn, ref, keep: true });
+      dlog.bind(p.dp, ref);
+      stats.applied++;
+      stats.kept++;
+      invalidStreak = 0;
+      const shown = plan.guarded ? { targetType: 'exit', target: { x: obs.self.exit.x, y: obs.self.exit.y } } : { targetType: plan.targetType, target: { ...plan.target } };
+      const line = { keep: true, ...shown, reason: p.result.reason || plan.reason, ...(p.result.memo ? { memo: p.result.memo } : {}) };
+      if (contract) {
+        if (p.result.memo) memo = p.result.memo;
+        track(turn, p, source, line, obs);
+      }
+      log.push({ ...entry, source, plan: line });
+      return;
+    }
     if (p.status === 'done') {
       const v = validatePlan(p.result, obs);
       if (v.ok) {
-        drop();
-        plan = { ...p.result, requestTurn: p.requestTurn, appliedTurn: turn, source: p.kind === 'repair' ? 'llm-repair' : 'llm', why: p.why, guarded: false, dp: p.dp };
-        const ref = dlog.ref(plan.targetType, plan.target);
+        const ref = dlog.ref(p.result.targetType, p.result.target);
+        drop(ref);
+        plan = { ...p.result, requestTurn: p.requestTurn, appliedTurn: turn, source, why: p.why, guarded: false, dp: p.dp };
         dlog.push('applied', p.dp, k, { rev: p.rev, effectiveTurn: turn, ref });
         dlog.bind(p.dp, ref);
         stats.applied++;
@@ -334,6 +375,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       n: turn, req: p ? p.requestTurn : turn, src, why: p ? p.why : null, targetType: pl.targetType, target: { ...pl.target },
       color: pl.targetType === 'gem' ? colorAt(obs, pl.target) : null, reason: pl.reason ?? '', follow: pl.follow ?? null,
       deviation: pl.deviation ?? '', memo: pl.memo ?? '', then: Array.isArray(pl.then) ? pl.then.length : 0, abandonIf: pl.abandonIf ?? null,
+      ...(pl.keep ? { keep: true } : {}),
     }, prevOutcome);
   }
 
@@ -656,6 +698,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         capped: stats.capped,
         queued: stats.queued,
         abandons: stats.abandons,
+        kept: stats.kept,
         deviations: deviations.slice(),
       };
     },

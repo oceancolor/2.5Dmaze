@@ -339,7 +339,7 @@ export const TOOLS = [
   },
   {
     name: 'maze_decide',
-    description: '提交当前决策点的决定：它从下一回合起立即执行，引擎跑到下一个决策点并返回新回包（或对局结果）。decision 就是决策契约里的 JSON 对象。带上 decisionPointId 防止误交给别的决策点；带上 submissionId 后，同一次提交重试会原样返回第一次的结果、不会重复推进。',
+    description: '提交当前决策点的决定：它从下一回合起立即执行，引擎跑到下一个决策点并返回新回包（或对局结果）。decision 就是决策契约里的 JSON 对象；局面没变、只想按原计划走时交 {keep:true}（目标 / then / abandonIf 原样保留）。带上 decisionPointId 防止误交给别的决策点；带上 submissionId 后，同一次提交重试会原样返回第一次的结果、不会重复推进。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -348,7 +348,9 @@ export const TOOLS = [
         submissionId: { type: 'string', description: '你为这次提交生成的 id（≤ 64 个字母数字 . _ : -）；网络重试时用同一个' },
         decision: {
           type: 'object',
+          description: '新目标：{targetType, target, reason, …}；或续走原计划：{keep: true, reason?, memo?}（目标 / then / abandonIf 原样保留）',
           properties: {
+            keep: { type: 'boolean', description: 'true = 续走当前计划（局面没变、被与你目标无关的事件问到时用）；此时不用写 targetType / target' },
             targetType: TARGET,
             target: POINT,
             reason: { type: 'string', description: '不超过 30 字' },
@@ -358,7 +360,6 @@ export const TOOLS = [
             abandonIf: { type: 'object', properties: { rivalLeadBy: { type: 'integer', minimum: 0 } }, description: '某个能「去目标再回家」的可见对手比你离目标近 ≥ rivalLeadBy 步时放弃（清空 then）并立刻重新问你；每个行动回合检查' },
             memo: { type: 'string', description: '留给下一次决策的自己（≤ 300 字）' },
           },
-          required: ['targetType', 'target', 'reason'],
         },
       },
       required: ['decision'],
@@ -461,7 +462,7 @@ function callTool(ctx, user, name, args = {}) {
       return pointText(g);
     }
     const d = args.decision;
-    if (!d || typeof d !== 'object') throw new ToolError('decision 必须是对象：{targetType, target:{x,y}, reason, then?, abandonIf?, memo?}');
+    if (!d || typeof d !== 'object') throw new ToolError('decision 必须是对象：{targetType, target:{x,y}, reason, then?, abandonIf?, memo?}，或续走 {keep:true, reason?, memo?}');
     const p = g.pending;
     g.pending = null;
     p.reply.deliver(JSON.stringify(d));

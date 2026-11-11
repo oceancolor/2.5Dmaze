@@ -16,7 +16,7 @@ export const FRAME_FIELDS = Object.freeze(['seats', 'events', 'gems', 'chest', '
 export const SEATS_LEGEND = 'seats[i] = [x, y, 体力, 分数, 状态]（座位 i；看不见的对手 x / y 为 null）';
 
 const OPEN = new Set(['applied', 'queued', 'guard']);
-const CLOSE = new Set(['reached', 'lost', 'abandoned', 'replaced', 'interrupted']);
+const CLOSE = new Set(['reached', 'lost', 'abandoned', 'replaced', 'continued', 'interrupted']);
 
 /**
  * 每帧「这一回合在执行哪个决策、去哪」：第 k 回合的那一步由 k 之前的结果事件决定（applied 在帧 a，第 a+1 回合起执行）。
@@ -90,13 +90,16 @@ const at = (k) => (k === 0 ? '开局' : `第 ${k} 回合`);
 export function outcomeLine(e, colors = []) {
   const r = refLabel(e.ref, colors);
   switch (e.type) {
-    case 'applied': return `${at(e.k)}${e.k === 0 ? '' : '结束后'}提交：去 ${r}（第 ${e.effectiveTurn} 回合起执行）`;
+    case 'applied': return e.keep
+      ? `${at(e.k)}${e.k === 0 ? '' : '结束后'}续走：去 ${r}`
+      : `${at(e.k)}${e.k === 0 ? '' : '结束后'}提交：去 ${r}（第 ${e.effectiveTurn} 回合起执行）`;
+    case 'continued': return `${at(e.k)}结束后由决策点 dp-${e.by} 续走（目标不变）`;
     case 'queued': return `${at(e.k)}结束后按 then 接着去 ${r}`;
     case 'reached': return `第 ${e.k} 回合${e.ref && e.ref.type === 'exit' ? '到达出口' : `拿到 ${r}`}`;
     case 'lost': return `第 ${e.k} 回合 ${r} 被座位 ${e.by} 拿走（你还差 ${e.behind} 步）`;
     case 'guard': return `${at(e.k)}结束后体力不够（去 ${e.dist} + 回 ${e.back} > 体力 ${e.stamina}），引擎改为回家`;
     case 'abandoned': return `${at(e.k)}结束后放弃：座位 ${e.seat} 比你近 ${e.lead} 步（条件 ≥ ${e.need}）`;
-    case 'replaced': return `${at(e.k)}结束后被决策点 dp-${e.by} 替换`;
+    case 'replaced': return `${at(e.k)}结束后被决策点 dp-${e.by} 换了目标`;
     case 'interrupted': return `${at(e.k)}被打断（${e.cause === 'takeover' ? '玩家接管' : e.cause}）`;
     case 'invalid': return `不合格：${e.why}`;
     case 'failed': return `调用失败：${e.why}`;

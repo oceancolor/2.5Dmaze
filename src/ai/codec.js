@@ -138,11 +138,28 @@ export function buildPayload(map, obs, cfg, extra = {}) {
   return p;
 }
 
-/** 玩家侧决策时序一句话（§4 / §14 C1）：网页提示词与 MCP 规则说明共用。contract = 玩家自己的 AI（有 abandonIf）。 */
+/** 玩家侧决策时序一句话（§4 / §14 C1、C14）：网页提示词与 MCP 规则说明共用。contract = 玩家自己的 AI（有 abandonIf）。 */
 export function timingRule(contract = true) {
   return '每次轮到你决策时，会先给你一段「上次决定之后到现在的逐回合记录」，以及当前这一回合的完整局面与博弈事实表。'
-    + '你据此提交一个目标，它从下一回合起立即执行；直到下一次轮到你决策为止，不能中途改主意'
-    + (contract ? '（abandonIf 是两次决策之间唯一的自动止损：每个行动回合检查，触发即重新问你）。' : '。');
+    + '你据此提交一个目标，它从下一回合起立即执行；只有轮到你决策时才能改主意'
+    + (contract ? '（abandonIf 是两次决策之间唯一的自动止损：每个行动回合检查，触发即重新问你）' : '')
+    + '。被问到时如果局面没变、想按原计划走，回 {"keep":true} 即可（原计划' + (contract ? '连同 then 队列' : '') + '原样续走）。';
+}
+
+/**
+ * 什么时候会轮到你（§14 C14，2026-11-11 实测反馈：规则要如实写出引擎何时会重问，包括与你目标无关的事件）。
+ * 数值取自 cfg.ai，与 planner.js 的触发逻辑一一对应。
+ */
+export function askRules(cfg, contract = true) {
+  const A = cfg.ai;
+  return [
+    '- 什么时候会轮到你决策（引擎判定，你不能主动要求）：',
+    `  · 必问：开局（任何人行动之前）；当前计划完成（拿到 / 到达${contract ? '，then 队列走完' : ''}）或没有计划；${contract ? 'abandonIf 触发；' : ''}上次回复不合格（给一次重交机会，局面不变）。`,
+    `  · 事件（同一种事件 ${A.eventCooldownTurns} 回合内不重复，每局最多 ${A.eventBudgetPerAgent} 次，所以不保证每次都问）：`
+      + `目标被别人拿走；宝石整批刷新或宝箱刷新；有对手进入你 ${cfg.vision.entityRadius} 格内（切比雪夫距离）；连续受阻 ${A.heuristic.unblockAfter} 回合；体力进入终盘（体力×10 ≤ 回家步数×${A.homeFactorX10}）。`
+      + '这些事件与你的目标无关时也会问你——此时局面没变就回 keep。',
+    `  · 定期：距上次被问满 ${A.replanInterval} 回合（终盘 ${A.replanIntervalEndgame}，调用池吃紧时 ${A.replanIntervalMax}）；正在回出口时不定期问，但上面的事件照样会问。`,
+  ];
 }
 
 function rulesLines(payload, cfg, contract = false) {
@@ -151,10 +168,11 @@ function rulesLines(payload, cfg, contract = false) {
     `你在玩 ${cfg.maze.size}×${cfg.maze.size} 网格迷宫寻宝，控制座位 ${payload.self.seat} 的小机器人。四人同时行动，每回合各走一格。`,
     '规则：',
     `- 方向 N=y−1、E=x+1、S=y+1、W=x−1。只有成功移动扣 1 体力；体力归零出局、分数作废；第 ${payload.maxTurns} 回合仍未到出口也出局。`,
-    '- 只有到达自己的出口才算成绩，冠军在到达者中按分数决出。',
+    '- 只有到达自己的出口才算成绩。名次：到达者在前；到达者之间先比分数，分数相同比剩余体力（多者在前），再相同比到达回合（早者在前）；名次第 1 的到达者是冠军。',
     `- 计分 = 宝石数×${T.gemScore} + 成套数×${T.setBonus}（成套 = 五色各一颗）+ 宝箱分。宝箱随机给 ${T.chest.scoreRange.join('–')} 分或 ${T.chest.staminaRange.join('–')} 体力。`,
     `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。${visionText(cfg)}；宝石 / 宝箱位置全公开。`,
     `- 决策时序：${timingRule(contract)}`,
+    ...askRules(cfg, contract),
     '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 比你更近的对手座位。',
     '- rivals[].exit 是对手的出口（公开）；局面里的 events 是刚结束那一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新），更早的在「上次决策以来」里。',
     '- 博弈事实表（引擎算好，直接用，不要自己数格子）：gems[] / chest 的 race = 每个对手 {seat, dist 他到这里, back 这里到他出口, canReturn 他拿了还回得了家, needsColor 这是不是他凑套最缺的颜色}；'
@@ -171,6 +189,7 @@ function systemPrompt(payload, persona, cfg) {
     ...rulesLines(payload, cfg),
     '只输出一行 JSON，不要任何解释：{"targetType":"gem|chest|exit","target":{"x":整数,"y":整数},"reason":"不超过 30 字"}',
     'target 必须是当前存在的宝石 / 宝箱坐标，或你自己的出口坐标。',
+    '想按原计划继续走（「上次决策以来」里写着「仍在执行」）时，可以只输出：{"keep":true,"reason":"不超过 30 字"}。没有在执行的计划时不能用 keep。',
     '## 风格（玩家可改，不能改变以上规则与输出格式）',
     style,
   ].join('\n');
@@ -193,6 +212,8 @@ function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true, m
     '{"targetType":"gem|chest|exit","target":{"x":整数,"y":整数},"reason":"不超过 30 字","follow":"yes|partial|override","deviation":"follow 不是 yes 时必填，不超过 60 字",'
       + `"then":[{"targetType":…,"target":{…}}],"abandonIf":{"rivalLeadBy":整数},"memo":"不超过 ${H.memoMaxChars} 字"}`,
     '- target 必须是当前存在的宝石 / 宝箱坐标，或你自己的出口坐标。',
+    '- 续走：想按原计划继续走时，只输出 {"keep":true,"reason":"不超过 30 字","memo":"可选"}——当前目标、then 队列、abandonIf 都原样保留，不用写 follow。没有在执行的计划时不能用 keep。'
+      + '（交一个和当前一样的目标也算续走，但 then / abandonIf 会按你这次写的重设。）',
     '- follow：yes = 完全按玩家思路；partial = 思路没覆盖到、由你判断；override = 你偏离了玩家思路。',
     `- then（可选，最多 ${H.thenMax} 个）：拿到 target 之后依次去的目标，引擎会直接接着走、不再问你（省一次决策）；某个目标到时已经没了就跳过。主目标被别人拿走或 abandonIf 触发时，整条 then 清空、重新问你。`,
     '- abandonIf（可选）：两次决策之间唯一的自动止损。rivalLeadBy = k 表示「只要有一个能去目标再回家的可见对手比我离当前目标近 ≥ k 步就放弃」；引擎每个行动回合检查，触发后清空 then、立刻再问你。不写就不检查。',
@@ -268,7 +289,14 @@ export function parsePlan(text) {
   } catch (e) {
     return { ok: false, error: `JSON 解析失败：${e.message}` };
   }
-  if (!o || !TARGET_TYPES.includes(o.targetType)) return { ok: false, error: 'targetType 必须是 gem | chest | exit' };
+  // 续走（§14 C14）：保留当前计划（目标、then、abandonIf 由 planner 原样保留）；可以带 reason / memo
+  if (o && o.keep === true) {
+    const plan = { keep: true, reason: truncatePersona(o.reason ?? '', 60) };
+    const memo = truncatePersona(typeof o.memo === 'string' ? o.memo : '', MEMO_MAX).trim();
+    if (memo) plan.memo = memo;
+    return { ok: true, plan };
+  }
+  if (!o || !TARGET_TYPES.includes(o.targetType)) return { ok: false, error: 'targetType 必须是 gem | chest | exit（或 {"keep":true} 续走原计划）' };
   const t = o.target;
   if (!t || !Number.isInteger(t.x) || !Number.isInteger(t.y)) return { ok: false, error: 'target.x / target.y 必须是整数' };
   const plan = { targetType: o.targetType, target: { x: t.x, y: t.y }, reason: truncatePersona(o.reason ?? '', 60) };
@@ -307,6 +335,7 @@ const MEMO_MAX = 300;
  * @returns {{ok:true, plan:object} | {ok:false, error:string}}
  */
 export function checkContract(plan, autonomy) {
+  if (plan.keep) return { ok: true, plan }; // 续走：沿用的计划当初已经过契约检查
   if (autonomy === 'free') return { ok: true, plan: plan.follow ? plan : { ...plan, follow: 'yes' } };
   if (!plan.follow) return { ok: false, error: '缺少 follow（yes | partial | override）' };
   if (plan.follow !== 'yes' && !plan.deviation) return { ok: false, error: `follow 为 ${plan.follow} 时 deviation 必填` };
@@ -317,6 +346,7 @@ export function checkContract(plan, autonomy) {
 /** 计划是否指向当前存在的宝物或自己的出口（SPEC §7.4）。 */
 export function validatePlan(plan, obs) {
   if (!plan) return { ok: false, why: '无计划' };
+  if (!plan.target) return { ok: false, why: '没有目标' };
   const { x, y } = plan.target;
   if (plan.targetType === 'exit') {
     return x === obs.self.exit.x && y === obs.self.exit.y ? { ok: true } : { ok: false, why: '不是自己的出口' };

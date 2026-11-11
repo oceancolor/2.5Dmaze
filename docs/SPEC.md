@@ -309,7 +309,8 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 - 帧号：`frame(0)` = 开局（尚未行动）；`frame(k)` = 第 k 回合结算后的局面（非终局时内部 `state.turn = k + 1`）。
 - 决策点基于 `frame(k)` 发请求，调度器**当场停下等回复**；回复合格后新计划驱动第 k+1 回合的**第一步**（`ai.planLatencyTurns = 0`）。首个决策点在 `frame(0)`，任何人行动之前。所有大模型座位同一规则；同一回合多个座位一起等，等最慢的。
 - 超过 `timeoutMs`（本地代理 8000；中转按思考档位）→ repair 一次 → 仍失败降级；熔断（L3）立即解除等待。
-- 每个决策点有编号 `dp`（修复重交沿用、`rev + 1`）；结果以事件流记录（applied / invalid / failed / stale / cancelled / guard / abandoned / lost / reached / queued / replaced / interrupted，见 redesign §14 C5）。零缓冲下 `stale` 应为 0。
+- 每个决策点有编号 `dp`（修复重交沿用、`rev + 1`）；结果以事件流记录（applied / invalid / failed / stale / cancelled / guard / abandoned / lost / reached / queued / replaced / continued / interrupted，见 redesign §14 C5、C14）。零缓冲下 `stale` 应为 0。
+- 被问到时可回 `{"keep":true}` 续走当前计划（目标 / then / abandonIf 原样保留，记 `continued`）；交同一目标也记 `continued`，换目标才记 `replaced`。规则正文如实列出何时会被问（含与目标无关的事件）与平局规则（分数 > 剩余体力 > 到达回合）。2026-11-11 起复盘里的「白跑」为净绕路（扣除顺路向出口的步数）。
 - 决策回包 / 提示词带「上次决策以来」：上一个决策点之后到本次的逐回合轨迹 + 上次决策的结果事件（与 MCP 同一个 `src/ai/decision-packet.js`）。
 - 回放只读记录、不调模型，所以对局结果与倍速、网络快慢无关。内核里没有墙钟窗口，等待和超时看门狗放在内核外层。
 - SPEC-0.2 及以前为 `L = 2`（第 t 回合请求、第 t+2 回合生效，期间沿用旧计划），只为旧配置保留。

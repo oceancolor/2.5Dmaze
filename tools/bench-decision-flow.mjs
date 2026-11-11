@@ -120,12 +120,12 @@ function table(rows) {
   const f1 = (x) => x.toFixed(1);
   const pc = (x) => `${(100 * x).toFixed(1)}%`;
   const L = [
-    '| 规格 | 局数 | 平均回合 | 每座位决策 / 局 | 决策 / 10 回合 | applied | stale | invalid | guard | abandoned | lost | reached | queued | replaced | 被抢率 | 座位0 均分 | 均名次 | 到达 | 冠军 | 请求字符（含轨迹 / 不含） | 最大录像 | 平均耗时 |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| 规格 | 局数 | 平均回合 | 每座位决策 / 局 | 决策 / 10 回合 | applied | stale | invalid | guard | abandoned | lost | reached | queued | replaced | continued | 被抢率 | 座位0 均分 | 均名次 | 到达 | 冠军 | 请求字符（含轨迹 / 不含） | 最大录像 | 平均耗时 |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const [size, r] of rows) {
     const o = r.outcomes;
-    L.push(`| ${size} | ${r.games} | ${f1(r.avgTurns)} | ${f1(r.decisionsPerSeatPerGame)} | ${r.decisionsPer10Turns.toFixed(2)} | ${o.applied} | ${o.stale} | ${o.invalid} | ${o.guard} | ${o.abandoned} | ${o.lost} | ${o.reached} | ${o.queued} | ${o.replaced} | ${pc(r.lostRate)} | ${r.me.avgScore.toFixed(2)} | ${r.me.avgPlace.toFixed(2)} | ${pc(r.me.escapeRate)} | ${pc(r.me.championRate)} | ${Math.round(r.avgPromptChars)} / ${Math.round(r.avgPromptCharsNoTraj)} | ${(r.maxRecordBytes / 1024).toFixed(1)} KB | ${Math.round(r.avgMs)} ms |`);
+    L.push(`| ${size} | ${r.games} | ${f1(r.avgTurns)} | ${f1(r.decisionsPerSeatPerGame)} | ${r.decisionsPer10Turns.toFixed(2)} | ${o.applied} | ${o.stale} | ${o.invalid} | ${o.guard} | ${o.abandoned} | ${o.lost} | ${o.reached} | ${o.queued} | ${o.replaced} | ${o.continued} | ${pc(r.lostRate)} | ${r.me.avgScore.toFixed(2)} | ${r.me.avgPlace.toFixed(2)} | ${pc(r.me.escapeRate)} | ${pc(r.me.championRate)} | ${Math.round(r.avgPromptChars)} / ${Math.round(r.avgPromptCharsNoTraj)} | ${(r.maxRecordBytes / 1024).toFixed(1)} KB | ${Math.round(r.avgMs)} ms |`);
   }
   return L.join('\n');
 }

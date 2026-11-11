@@ -221,6 +221,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
     const a = AUTONOMY[r.autonomy];
     const parts = [`遵循 ${f.yes}`, `部分 ${f.partial}`, `偏离 ${f.override}`, `不合格 ${r.invalid}`];
     if (r.stale) parts.push(`过期 ${r.stale}`);
+    if (r.kept) parts.push(`续走 ${r.kept}`);
     if (r.failed) parts.push(`调用失败 ${r.failed}`);
     const devs = r.deviations;
     return `<div class="report">

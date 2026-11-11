@@ -30,13 +30,26 @@ export function targetLabel(e) {
   return `宝石·${COLOR_NAME[e.color] || e.color || '?'}(${x},${y})`;
 }
 
-/** 结局 → 人话。 */
+/** 这段路里顺路向出口靠近的步数（§14 C14 净绕路口径）。 */
+const homewardOf = (e) => (Number.isFinite(e.d0) && Number.isFinite(e.d1) ? Math.max(0, Math.min(e.steps || 0, e.d0 - e.d1)) : 0);
+/** 「白跑 X 步」的说明：顺路的部分单独说出来。 */
+const wasteText = (e) => {
+  const s = e.steps ?? 0;
+  const h = homewardOf(e);
+  return h ? `白跑 ${s - h} 步（走了 ${s} 步，其中 ${h} 步顺路向出口）` : `白跑 ${s} 步`;
+};
+
+/** 结局 → 人话。kept = 期间被问到又续走的次数。 */
 export function outcomeText(e) {
+  return e.kept ? `${outcomeCore(e)}（期间续走 ${e.kept} 次）` : outcomeCore(e);
+}
+
+function outcomeCore(e) {
   const s = e.steps ?? 0;
   switch (e.outcome) {
     case 'got': return `拿到了（走了 ${s} 步）`;
-    case 'lost': return `被座位 ${e.by} 先拿走（我还差 ${e.behind} 步，白跑 ${s} 步）`;
-    case 'abandoned': return `主动放弃（${e.cause || '放弃条件触发'}，走了 ${s} 步）`;
+    case 'lost': return `被座位 ${e.by} 先拿走（我还差 ${e.behind} 步，${wasteText(e)}）`;
+    case 'abandoned': return `主动放弃（${e.cause || '放弃条件触发'}，${wasteText(e)}）`;
     case 'switched': return `改了主意（走了 ${s} 步）`;
     case 'guard': return `引擎安全覆盖：体力不够，改回家（走了 ${s} 步）`;
     case 'home': return '到家';
@@ -50,8 +63,11 @@ export function outcomeText(e) {
   }
 }
 
-/** 白跑：被抢走或主动放弃时这段路走的步数。 */
-export const wastedOf = (e) => (e.outcome === 'lost' || e.outcome === 'abandoned' ? e.steps || 0 : 0);
+/**
+ * 白跑：被抢走或主动放弃时这段路的「净绕路」= 走的步数 − 其间离自己出口近了的步数（最少 0）。
+ * 2026-11-11 起（§14 C14）：顺路往家走的那几步不算白跑；原步数仍在 steps 里。
+ */
+export const wastedOf = (e) => (e.outcome === 'lost' || e.outcome === 'abandoned' ? (e.steps || 0) - homewardOf(e) : 0);
 
 /**
  * 结局追踪器：同一套规则既给对局中的 planner 用（喂观察），也给复盘重放用（喂重放出的观察）。
@@ -63,19 +79,32 @@ export function createTracker(map, seat) {
   let cur = null;
   let lastPos = null;
   let lastTurn = 0;
+  let lastDist = null; // 当前离自己出口的步数（净绕路口径用）
   const distTo = (t, x, y) => fieldFrom(map, t.y * N + t.x)[y * N + x];
   function resolve(outcome, extra = {}) {
     if (!cur) return;
     Object.assign(cur, { outcome, endTurn: lastTurn, ...extra });
+    if (lastDist !== null) cur.d1 = lastDist;
     cur = null;
   }
   return {
     entries,
     get current() { return cur; },
-    /** 新目标生效（llm / llm-repair / queue / guard）；上一个目标按 prevOutcome 结束。 */
+    /**
+     * 新目标生效（llm / llm-repair / queue / guard）；上一个目标按 prevOutcome 结束。
+     * 续走（§14 C14）：大模型被问到后给的还是当前这个目标（keep，或交了同一个目标）→ 不另起一条，并入当前条目（kept + 1），
+     * 步数与白跑从这个目标最初开始走算起；备忘 / then / abandonIf 按这次的更新。
+     */
     start(e, prevOutcome = 'switched') {
+      if (prevOutcome === 'switched' && cur && cur.target && e.target && cur.targetType === e.targetType && cur.target.x === e.target.x && cur.target.y === e.target.y) {
+        cur.kept = (cur.kept || 0) + 1;
+        if (e.memo) cur.memo = e.memo;
+        if (!e.keep) Object.assign(cur, { then: e.then, abandonIf: e.abandonIf });
+        return cur;
+      }
       resolve(prevOutcome);
-      cur = { ...e, outcome: null, steps: 0, endTurn: null };
+      cur = { ...e, outcome: null, steps: 0, endTurn: null, ...(lastDist !== null ? { d0: lastDist } : {}) };
+      delete cur.keep;
       entries.push(cur);
       return cur;
     },
@@ -92,6 +121,7 @@ export function createTracker(map, seat) {
       lastTurn = Math.max(0, obs.turn - 1);
       if (cur && lastPos && (me.x !== lastPos[0] || me.y !== lastPos[1])) cur.steps++;
       lastPos = [me.x, me.y];
+      if (Number.isInteger(me.distToExit) && me.distToExit >= 0) lastDist = me.distToExit;
       if (!cur || !cur.target || cur.targetType === 'exit') return;
       const t = cur.target;
       for (const ev of obs.events || []) {
@@ -148,8 +178,9 @@ export function sessionText(entries, memo, keep = 8) {
   if (older.length) {
     const c = (o) => older.filter((e) => e.outcome === o).length;
     const wasted = older.reduce((a, e) => a + wastedOf(e), 0);
-    const worst = older.filter((e) => e.outcome === 'lost').sort((a, b) => b.steps - a.steps)[0];
-    L.push(`更早的 ${older.length} 条：拿到 ${c('got')} · 被抢 ${c('lost')} · 放弃 ${c('abandoned')} · 改主意 ${c('switched')} · 不合格 / 作废 ${c('invalid') + c('stale') + c('failed')}；白跑共 ${wasted} 步${worst ? `；损失最大：T${worst.n} ${targetLabel(worst)} 被座位 ${worst.by} 抢走，白跑 ${worst.steps} 步` : ''}`);
+    const worst = older.filter((e) => e.outcome === 'lost').sort((a, b) => wastedOf(b) - wastedOf(a))[0];
+    const worstW = worst ? wastedOf(worst) : 0;
+    L.push(`更早的 ${older.length} 条：拿到 ${c('got')} · 被抢 ${c('lost')} · 放弃 ${c('abandoned')} · 改主意 ${c('switched')} · 不合格 / 作废 ${c('invalid') + c('stale') + c('failed')}；白跑共 ${wasted} 步${worst ? `；损失最大：T${worst.n} ${targetLabel(worst)} 被座位 ${worst.by} 抢走，白跑 ${worstW} 步` : ''}`);
   }
   for (const e of recent) {
     const head = `T${e.n}${e.src === 'queue' ? ' [队列]' : e.why ? ` [${whyText(e.why)}]` : ''}`;
@@ -173,10 +204,12 @@ export function keyMistakes(entries, k = 3) {
 /** 复盘统计。 */
 export function timelineStats(entries) {
   const c = (o) => entries.filter((e) => e.outcome === o).length;
+  const kept = entries.reduce((a, e) => a + (e.kept || 0), 0);
   return {
-    decisions: entries.filter((e) => e.src === 'llm' || e.src === 'llm-repair' || e.outcome === 'invalid' || e.outcome === 'stale' || e.outcome === 'failed').length,
+    // 续走并入了原条目，所以决策次数要把续走次数加回来
+    decisions: entries.filter((e) => e.src === 'llm' || e.src === 'llm-repair' || e.outcome === 'invalid' || e.outcome === 'stale' || e.outcome === 'failed').length + kept,
     got: c('got'), lost: c('lost'), abandoned: c('abandoned'), switched: c('switched'), guard: c('guard'),
-    invalid: c('invalid'), stale: c('stale'), failed: c('failed'),
+    invalid: c('invalid'), stale: c('stale'), failed: c('failed'), kept,
     wasted: entries.reduce((a, e) => a + wastedOf(e), 0),
   };
 }
@@ -189,7 +222,7 @@ const STATUS_ZH = { escaped: '到达出口', dead: '体力耗尽出局', timeout
 export function matchDigest({ mapSize, size, turns, me, stats, mistakes, entries }) {
   const L = [
     `地图 ${mapSize}（${size}×${size}），共 ${turns} 回合。你的结果：${STATUS_ZH[me.status] || me.status}，${me.score} 分，第 ${me.place} 名。`,
-    `决策 ${stats.decisions} 次：拿到 ${stats.got} · 被抢 ${stats.lost} · 主动放弃 ${stats.abandoned} · 改主意 ${stats.switched} · 引擎安全覆盖 ${stats.guard} · 不合格 ${stats.invalid} · 作废 ${stats.stale} · 失败 ${stats.failed}；白跑共 ${stats.wasted} 步。`,
+    `决策 ${stats.decisions} 次（其中续走 ${stats.kept || 0} 次）：拿到 ${stats.got} · 被抢 ${stats.lost} · 主动放弃 ${stats.abandoned} · 改主意 ${stats.switched} · 引擎安全覆盖 ${stats.guard} · 不合格 ${stats.invalid} · 作废 ${stats.stale} · 失败 ${stats.failed}；白跑共 ${stats.wasted} 步（净绕路：顺路向出口的步数不算）。`,
   ];
   if (mistakes.length) L.push('损失最大的几次：', ...mistakes.map((m, k) => `${k + 1}. ${m.text}${m.reason ? `（当时的理由：${m.reason}）` : ''}`));
   L.push('逐条决策（回合 · 目标 · 理由 → 结局）：');
@@ -270,7 +303,7 @@ export function timelineFromRecord(jsonl, cfg, seat = 0) {
           ...base, targetType: p.targetType, target: { x: p.target.x, y: p.target.y },
           color: p.targetType === 'gem' ? colorAt(state, cfg, p.target.x, p.target.y) : null,
           reason: p.reason ?? '', follow: p.follow ?? null, deviation: p.deviation ?? '', memo: p.memo ?? '',
-          then: Array.isArray(p.then) ? p.then.length : 0, abandonIf: p.abandonIf ?? null,
+          then: Array.isArray(p.then) ? p.then.length : 0, abandonIf: p.abandonIf ?? null, ...(p.keep ? { keep: true } : {}),
         };
         tr.start(e, L.src === 'guard' ? 'guard' : L.src === 'queue' ? 'got' : 'switched');
       } else if (L.src === 'abandon') {

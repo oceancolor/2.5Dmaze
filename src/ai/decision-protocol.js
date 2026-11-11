@@ -10,7 +10,7 @@
 import { fieldFrom } from '../core/nav/bfs.js';
 
 export const OUTCOME_TYPES = Object.freeze([
-  'applied', // 计划开始执行 {rev, effectiveTurn, ref}
+  'applied', // 计划开始执行 {rev, effectiveTurn, ref, keep?}（keep = 续走原计划）
   'invalid', // 提交不合法 / 不合契约 {rev, why}
   'failed', // 调用失败（超时 / 网络 / 熔断）{rev, why}
   'stale', // 生效时目标已没了（请求时合法）{rev, why}；零延迟后应恒为 0
@@ -20,7 +20,8 @@ export const OUTCOME_TYPES = Object.freeze([
   'lost', // 目标被别人拿走 {by, behind, ref}
   'reached', // 拿到目标 / 开箱 / 到达出口 {ref}
   'queued', // then 接续下一个目标 {ref}
-  'replaced', // 被下一次决策替换 {by}
+  'replaced', // 被下一次决策换了目标 {by}
+  'continued', // 下一次决策续走了同一个目标（keep，或交了同一个目标）{by}；§14 C14
   'interrupted', // 执行中被打断（玩家接管 / 换控制器）{cause}
 ]);
 
