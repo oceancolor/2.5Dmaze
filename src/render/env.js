@@ -171,7 +171,7 @@ export function buildPlan(size, boxOf) {
         ok = null;
       }
       if (!ok) continue; // 图集里没有（旧图集 / 还没出图）就跳过
-      marks.push({ name, wx, wy, depth: (wy - CLIFF - 2 * HALF_H) / (2 * HALF_H), glow: GLOWS[k] || null });
+      marks.push({ name, wx, wy, depth: (wy - CLIFF - 2 * HALF_H) / (2 * HALF_H), glow: GLOWS[k] || null, scene: cl });
     }
   }
   // 空地：沿边展开的椭圆 → 近似成世界轴向椭圆（rx 取沿边投影，ry 取等距压扁后的高度）

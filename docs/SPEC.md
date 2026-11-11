@@ -1,6 +1,7 @@
 # 迷宫寻宝博弈 · 实现规格（SPEC）
 
-> 版本 **SPEC-0.2** · 2026-11-06（批次 6：对手位置全公开；接入大模型改为 harness —— 博弈事实表、本局会话、跨局经验、目标队列 / 放弃条件、思考档位，见 §6.1、§7.7 与 docs/05 §7.6–§7.9）
+> 版本 **SPEC-0.3** · 2026-11-10（决策协议改造：大模型决策零缓冲 —— 基于第 k 回合结算后的局面提交、从第 k+1 回合起执行，首个决策点在开局；决策回包带「上次决策以来」的逐回合轨迹与结果事件；记录 v3。见 §7.5、§12 与 `docs/maze-treasure-decision-flow-redesign.md` §14。SPEC-0.2 的成绩按用户裁定作废）
+> SPEC-0.2 · 2026-11-06（批次 6：对手位置全公开；接入大模型改为 harness —— 博弈事实表、本局会话、跨局经验、目标队列 / 放弃条件、思考档位，见 §6.1、§7.7 与 docs/05 §7.6–§7.9）
 > SPEC-0.1 · 2026-10-25（同日阶段 1 实现后回填：标定值、随机流、记录格式、启发式让行、基线数据，见附录 B）；其配置冻结在 `src/config/legacy.js`，旧记录照常校验
 >
 > **本文件是实现的唯一依据。** `docs/00`–`docs/04` 自本日起**冻结**为参考依据，不再修改；与本文件冲突时一律以本文件为准。
@@ -303,18 +304,21 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 - 事件调用计入常态池。池子耗尽 → 该 agent 转启发式（§8）。
 - 提示词托管的玩家算第 4 个 agent，共用同一套池子。
 
-### 7.5 生效时序 【实现】（同时解决「决策预取」和「确定性」）
+### 7.5 生效时序 【实现】（SPEC-0.3 起零缓冲，2026-11-10）
 
-- 第 t 回合用回合开始时的快照发出请求 → 计划在第 `t + L` 回合第 1 阶段生效（`ai.planLatencyTurns`，默认 L = 2）。生效前沿用旧计划或启发式。
-- 到了第 `t + L` 回合仍未返回 → 引擎**等待**（与倍速无关）；超过 `timeoutMs`（8000）→ 降级。
-- 记录 `requestTurn / appliedTurn / plan / source`。回放只读记录、不调模型，所以对局结果与倍速、网络快慢无关。
-- 内核里没有墙钟窗口（旧的 1500 ms `decisionWindowMs` 作废）。等待和超时看门狗放在内核外层。
+- 帧号：`frame(0)` = 开局（尚未行动）；`frame(k)` = 第 k 回合结算后的局面（非终局时内部 `state.turn = k + 1`）。
+- 决策点基于 `frame(k)` 发请求，调度器**当场停下等回复**；回复合格后新计划驱动第 k+1 回合的**第一步**（`ai.planLatencyTurns = 0`）。首个决策点在 `frame(0)`，任何人行动之前。所有大模型座位同一规则；同一回合多个座位一起等，等最慢的。
+- 超过 `timeoutMs`（本地代理 8000；中转按思考档位）→ repair 一次 → 仍失败降级；熔断（L3）立即解除等待。
+- 每个决策点有编号 `dp`（修复重交沿用、`rev + 1`）；结果以事件流记录（applied / invalid / failed / stale / cancelled / guard / abandoned / lost / reached / queued / replaced / interrupted，见 redesign §14 C5）。零缓冲下 `stale` 应为 0。
+- 决策回包 / 提示词带「上次决策以来」：上一个决策点之后到本次的逐回合轨迹 + 上次决策的结果事件（与 MCP 同一个 `src/ai/decision-packet.js`）。
+- 回放只读记录、不调模型，所以对局结果与倍速、网络快慢无关。内核里没有墙钟窗口，等待和超时看门狗放在内核外层。
+- SPEC-0.2 及以前为 `L = 2`（第 t 回合请求、第 t+2 回合生效，期间沿用旧计划），只为旧配置保留。
 
 ### 7.6 降级链（对局绝不中断）【沿用】
 
 | 级别 | 触发 | 行为 |
 |---|---|---|
-| L0 | 新计划还没到生效回合 | 沿用当前计划 |
+| L0 | 等待回复中 | 整局停在这一回合（零缓冲后不再「沿用旧计划先走」） |
 | L1 | 没有有效计划 / 目标失效 / 预算耗尽 | 启发式（§8） |
 | L2 | 超时 / JSON 不可解析 | repair 1 次（≤150 token），再失败转 L1 |
 | L3 | 代理不可达 / 连续 3 次 5xx / 429 持续 | 本局全体改用启发式，HUD 提示 |
@@ -449,12 +453,13 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
   - `core/`、`ai/`、`record/`、`sim/`、`config/` 不读时钟、不用计时器。`tools/lint-determinism.mjs` 扫描这些目录，`npm test` 先跑它。
 - **数值**：状态全部为整数；比例比较一律用整数乘法（如 `s*10 ≤ d*13`）。
 - **哈希**：`stateHash` 对规范化 JSON（键排序）的动态状态做 FNV-1a 32 位哈希；静态地图单独算一次 `mapHash`；`configHash` 对整份 config 计算。
-- **记录格式（JSONL，`RECORD_VERSION = 2`；回放器同时接受 v1）**【实现】紧凑格式：
-  - `{"t":"meta","v":2,"rulesVersion","seed","configHash","mapHash","attempts","seats"?}`——`seats` 是各座位的控制通道标签（`manual` / `script` / `prompt-mock` / `mock:setHunter` / `proxy:chest` / `heuristic` …），只作复盘说明
+- **记录格式（JSONL，`RECORD_VERSION = 3`；回放器同时接受 v1 / v2）**【实现】紧凑格式：
+  - `{"t":"meta","v":3,"rulesVersion","seed","configHash","mapHash","attempts","seats"?}`——`seats` 是各座位的控制通道标签（`manual` / `script` / `prompt-mock` / `mock:setHunter` / `proxy:chest` / `heuristic` …），只作复盘说明
   - `{"t":"turn","n":12,"i":"NE.-","h":"a1b2c3d4"}`——`i` 每座位一个字符：`N E S W`，`.` = STAY（无法识别的意图也记 `.`），`-` = 不在场；`h` = 本回合结算后的 `stateHash`
-  - `{"t":"plan","n":13,"seat":1,"req":11,"src":"llm","plan":{targetType,target,reason}}`——v2 新增：LLM / 提示词托管的计划**生效**行。`n` = 生效回合，`req` = 发起回合（`n − req ≥ L`），`src` ∈ `llm` / `llm-repair` / `invalid` / `failed`。严格回放不读它，只供复盘
+  - `{"t":"plan","n":13,"seat":1,"req":13,"src":"llm","dp":5,"rev"?,"plan":{targetType,target,reason}}`——LLM / 提示词托管的计划**生效**行。`n` = 生效回合，`req` = 发起回合（SPEC-0.3 零缓冲下 `n = req`），`src` ∈ `llm` / `llm-repair` / `invalid` / `stale` / `failed` / `queue` / `guard` / `abandon`，`dp` / `rev` = 决策点编号与修复版本（v3）。严格回放不读它，只供复盘
+  - `{"t":"outcome","seat":1,"dp":5,"type":"lost","k":20,...}`——v3 新增：所有大模型座位的决策结果事件（`k` = 帧号，原因参数见 redesign §14 C5）。严格回放不读它，服务器只做形状检查
   - `{"t":"end","n":388,"ranking":[{seat,place,champion,status,score,stamina}]}`
-  - 事件不落盘（可由回放重算）。
+  - 事件与决策帧不落盘（可由回放重算：`src/record/frame-replay.js` 由「严格回放 + 逐回合 observe」重建任意座位的帧，与对局中实时帧逐字段一致）。
 - **严格回放**：只读记录，不调用任何决策者；先校验 `configHash` 与 `mapHash`，再逐回合比对哈希，不一致立即抛 `ReplayMismatch`（带回合号）。
 - **存储**：浏览器端存 IndexedDB（最近 20 局）；本地代理可选落盘。【U7 后】服务器是对战数据的权威存档：服务器宿主的对局直接入库；客户端宿主的对局结束后上传，服务器用同一内核严格回放校验（`verified` / `mismatch`）；离线对局联网后补传。IndexedDB 降为本地缓存和离线队列。详见 06 §6。**S0 已实现**（2026-10-29）：游客令牌、`POST /api/v1/matches` 上传 + 校验、离线补传、设置页「我的战绩」，实现说明见 06 §13.1。
 
@@ -495,7 +500,7 @@ tests/     *.test.mjs（node --test）
 
 ```js
 {
-  rulesVersion: 'SPEC-0.2',   // 2026-11-06 批次 6；SPEC-0.1 整份冻结在 src/config/legacy.js
+  rulesVersion: 'SPEC-0.3',   // 2026-11-10 决策协议改造（ai.planLatencyTurns 2 → 0）；SPEC-0.2 作废；SPEC-0.1 整份冻结在 src/config/legacy.js
   match:    { playerSeat: 0, playerMode: 'manual' },          // manual | prompt | script | byok（§9.4 B）
   maze: {
     size: 128, wallDensityTarget: 0.355, wallDensityTol: 0.008,
@@ -531,7 +536,7 @@ tests/     *.test.mjs（node --test）
     eventCooldownTurns: 3, eventBudgetPerAgent: 10,
     maxCallsPerGame: 360, poolNormal: 240, poolEndgame: 120,
     normalSoftCapPerAgent: 60, endgameBudgetPerAgent: 10,
-    planLatencyTurns: 2,
+    planLatencyTurns: 0,       // SPEC-0.3 零缓冲（§7.5）；SPEC-0.2 及以前为 2
     heuristic: { returnMarginX10: 13, wProgress: 0.5, wChestLow: 1.2, wChestHigh: 0.6, chestLowStamina: 300,
                  unblockAfter: 2, detourMaxExtra: 12, detourCommitTurns: 12,          // 解锁与让行（§8.5）
                  yieldMaxTurns: 16, yieldEscalateAfter: 6, yieldPct: 50 },
@@ -658,7 +663,7 @@ tests/     *.test.mjs（node --test）
 | 出口开洞 | 3×3 与「出口格 + 内侧 1 格」两种写法并存 | 出口格 + 内侧 1 格，开口宽 1，并校验 |
 | 事件 | 6 条，④ 为边沿型，阈值 `s ≤ 1.3d` | 5 条；④ 为持续状态，阈值 `s < d`；删除 ⑤ |
 | 终盘定义 | 「最后 60 回合」/「体力 ≤60」并存 | 每个 agent 自判 `s*10 ≤ d*13` |
-| LLM 生效 | 1500 ms 墙钟窗口 + 预取 | 第 t+L 回合生效，回放只读记录 |
+| LLM 生效 | 1500 ms 墙钟窗口 + 预取 | 基于第 k 回合结算后的局面、第 k+1 回合起执行（SPEC-0.3 零缓冲；0.2 及以前为 t+2），回放只读记录 |
 | 脚本 L1 降级 | 每回合停留 | 引擎按 BFS 自动回家 |
 | 体力取值 | 全局 400 | 按玩家通道分别配置，同一局四人相同 |
 | 回合数门禁 | 320–400 回合 | 改为按通道的时长门禁（待定） |

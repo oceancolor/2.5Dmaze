@@ -11,7 +11,11 @@
 // 手动输入朝墙：不提交意图、不消耗回合，只回一个本地「撞墙」反馈（地形全公开，UI 自己能判）。
 //
 // 控制器接口：{ decide(obs, turn) → dir | {dir,...}, begin?(obs, turn), blocking?(turn) → bool,
-//              takeLog?() → plan 行[], wantsPatch?: bool, wantsManual?: bool（脚本 L2：切回手动）}
+//              takeLog?() → plan 行[], wantsPatch?: bool, wantsManual?: bool（脚本 L2：切回手动）,
+//              wantsFrames?: bool（大模型规划器：采集该座位的决策帧，见 ai/decision-frames.js）}
+//
+// 决策帧（§14 C1 / C7）：开局 frame(0)，每回合结算后 frame(k)，终局帧随最后一回合。
+// 帧与下一回合交给控制器的观察是同一个 observe() 结果（同源）；不进 state，不影响 stateHash / 记录。
 
 import { createMatch } from '../core/state.js';
 import { step } from '../core/game.js';
@@ -20,6 +24,7 @@ import { stateHash } from '../core/hash.js';
 import { DX, DY, STAY, toDir } from '../core/geom.js';
 import { fieldFrom } from '../core/nav/bfs.js';
 import { createHeuristic } from '../ai/heuristic.js';
+import { createFrameLog, toFrame } from '../ai/decision-frames.js';
 import { createRecorder } from '../record/recorder.js';
 
 /** 输入缓冲上限（04 L05：≥3 且明示丢弃）。 */
@@ -71,6 +76,7 @@ export function estimateSeconds(turnsLeft, cfg, speed, skipAnim = false, waitPer
  *   match：预先建好的 createMatch(seed, cfg)（异步控制器要先拿地图时用；必须是同一 seed / cfg）
  *   players：记录 meta 里玩家 AI 的说明（服务商 / 模型 / 自主度 / 思路哈希），见 recorder.js
  *   scripts：记录 meta 里脚本座位的说明（名称 / 作者 / 来源 / 代码哈希），见 recorder.js
+ *   frames：true = 所有座位都采集决策帧；数组 = 额外采集这些座位（wantsFrames 的控制器所在座位总是采集）
  */
 export function createScheduler(cfg, seed, opts = {}) {
   const playerSeat = opts.playerSeat ?? cfg.match.playerSeat;
@@ -113,6 +119,31 @@ export function createScheduler(cfg, seed, opts = {}) {
   let dropped = 0;
   let begun = -1;
   let obsCache = new Array(n).fill(null);
+  // 结算后为下一回合预先算好的观察（采帧时顺手算的那一份），beginTurn 直接拿来用 → 决策观察与帧同源
+  let nextObs = new Array(n).fill(null);
+  // 要帧的控制器（大模型规划器：结果事件 reached / lost 靠帧判定）所在座位总是采集；frames 选项只能额外加座位
+  const wanted = ctrls.flatMap((c, i) => (c && c.wantsFrames ? [i] : []));
+  const extra = opts.frames === true ? Array.from({ length: n }, (_, i) => i) : Array.isArray(opts.frames) ? opts.frames : [];
+  const frameSeats = [...new Set([...wanted, ...extra])].sort((p, q) => p - q);
+  const frames = frameSeats.length ? createFrameLog(frameSeats) : null;
+
+  /** 采一帧：state 是第 k 回合结算后的局面，events 是第 k 回合的事件（开局 k=0、事件为空）。 */
+  function capture(events, k) {
+    for (const i of frames.seats) {
+      const o = observe(map, state, i, cfg, { patch: Boolean(ctrls[i] && ctrls[i].wantsPatch), events });
+      frames.push(i, toFrame(o, k));
+      if (!state.ended) nextObs[i] = o;
+      if (ctrls[i] && ctrls[i].onFrame) ctrls[i].onFrame(frames.get(i, k));
+    }
+  }
+  if (frames) capture([], 0);
+
+  /** 控制器新增的结果事件 → 录像 outcome 行（§14 C9）。 */
+  function flushOutcomes() {
+    ctrls.forEach((c, i) => {
+      if (c && c.takeOutcomes) for (const e of c.takeOutcomes()) rec.outcome(i, e);
+    });
+  }
 
   const emit = (type, payload) => {
     for (const fn of listeners.get(type) ?? []) fn(payload);
@@ -157,7 +188,8 @@ export function createScheduler(cfg, seed, opts = {}) {
   function beginTurn() {
     if (begun === state.turn) return;
     begun = state.turn;
-    obsCache = new Array(n).fill(null);
+    obsCache = nextObs;
+    nextObs = new Array(n).fill(null);
     for (let i = 0; i < n; i++) {
       const c = ctrls[i];
       if (c && c.begin && state.actors[i].status === 'active') c.begin(obsFor(i), state.turn);
@@ -180,6 +212,7 @@ export function createScheduler(cfg, seed, opts = {}) {
       intents[i] = d && typeof d === 'object' ? d.dir : d;
       if (c.takeLog) for (const p of c.takeLog()) rec.plan(p);
     }
+    flushOutcomes(); // begin / decide 里产生的（applied / invalid / queued / guard / abandoned / replaced / 撤销）
     const r = step(map, prev, intents, cfg);
     hash = stateHash(r.state);
     rec.turn(prev.turn, intents, prev.actors, hash);
@@ -187,6 +220,9 @@ export function createScheduler(cfg, seed, opts = {}) {
     const duration = fast ? 0 : turnDuration(r, cfg, speed, skipAnim);
     last = { n: prev.turn, prev, next: r.state, events: r.events, dirs: r.dirs, moved: r.moved, intents, decisions, start: now, duration, speed, hash, skipped: fast };
     busyUntil = now + duration;
+    // 采帧（含终局帧）在 end 行之前：采帧时判定的 reached / lost 要在 end 行之前写进录像
+    if (frames) capture(r.events, prev.turn);
+    flushOutcomes();
     if (r.state.ended) rec.end(r.state);
     // 脚本 L2：连续硬异常 → 玩家座位切回手动（下一回合起）
     const pc = ctrls[playerSeat];
@@ -216,6 +252,8 @@ export function createScheduler(cfg, seed, opts = {}) {
     get state() { return state; },
     get hash() { return hash; },
     get last() { return last; },
+    /** 决策帧（没有座位采集时为 null），见 ai/decision-frames.js。 */
+    get frames() { return frames; },
     get speed() { return speed; },
     get skipAnim() { return skipAnim; },
     get fast() { return fast; },
@@ -251,13 +289,24 @@ export function createScheduler(cfg, seed, opts = {}) {
     /**
      * 换玩家座位的控制器（05 §4 / §8.1：接管 = null 手打；交还 AI；换启发式代打）。下一次结算起生效。
      * 严格回放只读意图，换控制器不影响校验。本回合已开始过的话，补调新控制器的 begin（每回合恰好一次）。
+     * §14 C2「接管即作废，交还重问」：被换下的控制器 cancel()（撤销在途请求、当前计划作废）；
+     * 换上的控制器若收帧，先补发它没收到的帧（接管期间的），再 begin。
      */
     setPlayerController(c) {
       if (state.ended) return;
+      const old = ctrls[playerSeat];
+      if (old && old !== c && old.cancel) {
+        old.cancel('takeover');
+        if (old.takeOutcomes) for (const e of old.takeOutcomes()) rec.outcome(playerSeat, e);
+      }
       ctrls[playerSeat] = c;
       manual = c === null;
       queue.length = 0;
       obsCache[playerSeat] = null;
+      nextObs[playerSeat] = null;
+      if (c && c.onFrame && frames && frames.has(playerSeat)) {
+        for (let k = (c.frameK ?? -1) + 1; k <= frames.lastK(playerSeat); k++) c.onFrame(frames.get(playerSeat, k));
+      }
       if (c && c.begin && begun === state.turn && playerActive()) c.begin(obsFor(playerSeat), state.turn);
     },
 

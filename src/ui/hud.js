@@ -212,7 +212,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
   /** 报告里的用量行；server = true 表示已换成服务器账本（含客户端超时放弃、但服务商照样计费的调用）。 */
   function usageText(u, r) {
     return `经服务器调用 ${u.calls} 次（其中修复 ${r.repairs}${u.failed ? `、客户端放弃 ${u.failed}` : ''}）· 输入 ${tokensText(u.in)} / 输出 ${tokensText(u.out)} token`
-      + `${u.server ? '（服务器账本）' : ''} · 费用记在你的服务商账户${r.stale ? ' · 过期 = 回复合格，但生效时目标已被别人拿走' : ''}`;
+      + `${u.server ? '（服务器账本）' : ''} · 费用记在你的服务商账户${r.stale ? ' · 过期 = 回复合格，但应用时目标已没了（现行规则下决定从下一回合立即执行，正常不会出现）' : ''}`;
   }
 
   /** 思路执行报告（05 §8.3）。 */
@@ -415,7 +415,10 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
       const wf = sched.waitingFor.filter((i) => i !== sched.playerSeat).map((i) => SEAT_NAMES[i]);
       if (s.ended) hint.textContent = '';
       else if (sched.waitingFor.length && waitMs > 300) {
-        hint.innerHTML = sched.waitingFor.includes(sched.playerSeat) && !wf.length ? '等你的脚本返回…' : `等待 ${wf.join('、')} 规划…`;
+        // SPEC-0.3 零缓冲：大模型座位每次决策整局都停下等它（玩家自己的 AI 也一样）
+        const mine = sched.waitingFor.includes(sched.playerSeat);
+        const mineText = mine ? (sched.controllers[sched.playerSeat] && sched.controllers[sched.playerSeat].kind === 'planner' ? '你的 AI' : '你的脚本') : '';
+        hint.innerHTML = `等待 ${[...(mine ? [mineText] : []), ...wf].join('、')} 决策…`;
       } else if (!active) hint.textContent = '观战中 · 点右下名牌切换镜头跟随 · 拖拽平移 · 滚轮缩放';
       else if (sched.controllers[0] && sched.controllers[0].kind === 'recorded') hint.textContent = '回放中 · [ ] 跳到上 / 下一个决策 · P 暂停 · 拖拽平移 · 滚轮缩放';
     else if (!sched.manual) hint.textContent = `你的 ${seats[sched.playerSeat]?.label ?? 'Agent'} 正在代打 · 拖拽平移 · 滚轮缩放 · Esc 设置`;

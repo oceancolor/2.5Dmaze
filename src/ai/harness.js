@@ -17,7 +17,7 @@ import { decodeIntents } from '../record/recorder.js';
 export const COLOR_NAME = Object.freeze({ red: '红', yellow: '黄', green: '绿', blue: '蓝', purple: '紫' });
 const WHY_ZH = Object.freeze({
   start: '开局', complete: '计划完成', interval: '定期', targetLost: '目标被抢', refresh: '宝物刷新',
-  blocked: '被堵', lowStamina: '体力进终盘', sighted: '对手接近', abandon: '放弃条件触发', note: '喊话',
+  blocked: '被堵', lowStamina: '体力进终盘', sighted: '对手接近', abandon: '放弃条件触发', note: '喊话', resume: '接管后交还',
 });
 export const whyText = (why) => WHY_ZH[why] || why || '';
 
@@ -41,7 +41,7 @@ export function outcomeText(e) {
     case 'guard': return `引擎安全覆盖：体力不够，改回家（走了 ${s} 步）`;
     case 'home': return '到家';
     case 'open': return `对局结束时还在路上（走了 ${s} 步）`;
-    case 'stale': return '作废：生效时目标已经没了';
+    case 'stale': return '作废：应用时目标已经没了';
     case 'invalid': return `不合格：${e.err || ''}`;
     case 'failed': return `调用失败：${e.err || ''}`;
     case null:

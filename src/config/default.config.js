@@ -1,10 +1,13 @@
 // docs/SPEC.md §14 —— config 键表的唯一来源。改数值须同步 SPEC。
 // 覆盖方式：makeConfig({ ...局部覆盖 })；未知键直接抛错（防拼写错误静默失效）。
 
+// SPEC-0.3（2026-11-10 决策协议改造，docs/maze-treasure-decision-flow-redesign.md §14）：大模型决策零缓冲 ——
+//   基于第 k 回合结算后的局面提交，计划从第 k+1 回合第一步执行（planLatencyTurns 2 → 0）；首个决策点在开局任何人行动之前。
+//   用户裁定旧成绩作废：SPEC-0.2 记录不再被认可（数据库不删），只有 SPEC-0.1 的冻结配置继续保留。
 // SPEC-0.2（2026-11-06 批次 6）：视野全公开 + 大模型 harness（博弈事实表 / 会话记忆 / 目标队列 / 思考档位）。
 // 旧版 SPEC-0.1 的完整配置冻结在 legacy.js（服务器校验旧记录用），这里可以按新方案改。
 const DEFAULTS = {
-  rulesVersion: 'SPEC-0.2',
+  rulesVersion: 'SPEC-0.3',
 
   match: { playerSeat: 0, playerMode: 'manual' }, // manual | prompt | script | byok（05 模式 B：接入玩家自己的大模型）
 
@@ -82,7 +85,7 @@ const DEFAULTS = {
     poolEndgame: 120,
     normalSoftCapPerAgent: 60,
     endgameBudgetPerAgent: 10,
-    planLatencyTurns: 2,
+    planLatencyTurns: 0, // SPEC-0.3：零缓冲（请求当回合就等回复，回复后用于这一步行动）
     heuristic: {
       returnMarginX10: 13,
       wProgress: 0.5,
@@ -107,7 +110,7 @@ const DEFAULTS = {
       // 玩家自己的 AI（决策契约 v2：可带后续目标、放弃条件、≤ 300 字备忘），回答本身的输出预算
       contractMaxTokens: 900,
       // 经服务器中转（05 §7.4）：客户端超时略短于服务器的上游超时（按思考档位：45 / 75 / 150 s）。
-      // 游戏在生效回合会等，放宽超时只让节奏变慢，不影响结果；客户端放弃的那次服务器照样计费，所以宁可多等。
+      // 游戏在决策点会停下等，放宽超时只让节奏变慢，不影响结果；客户端放弃的那次服务器照样计费，所以宁可多等。
       // 思考档位实测（2026-11-06，开局局面一次决策）：Kimi K3 低 2.8 s / 高 27 s；DeepSeek 低 13.6 s / 高 21 s；GLM 低 3.7 s / 高 37 s；HY4 开思考写不出答案，只能关。
       byokTimeoutMs: { off: 40000, low: 70000, high: 145000 },
     },

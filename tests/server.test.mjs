@@ -280,6 +280,9 @@ test('开发模式静态文件：游戏页带 CSP；服务器源码 / 文档 / �
       assert.equal((await s.call('GET', p)).status, 404, p);
     }
     assert.equal((await s.call('GET', '/tools/preview/')).status, 200, '调试页照常可用');
+    for (const p of ['/tools/gallery/env.html', '/tools/gallery/env-browser.js', '/tools/gallery/env-catalog.js']) {
+      assert.equal((await s.call('GET', p)).status, 200, `场外资产目录可访问：${p}`);
+    }
     const trav = await s.call('GET', '/src/%2e%2e/%2e%2e/package.json');
     assert.ok([403, 404].includes(trav.status), `路径穿越 ${trav.status}`);
     const enc = await s.call('GET', '/src/..%2f..%2fpackage.json');

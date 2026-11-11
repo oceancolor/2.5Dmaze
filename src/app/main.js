@@ -143,6 +143,8 @@ for (const ev of ['keydown', 'pointerdown']) addEventListener(ev, () => sfx.unlo
 function disposeGame() {
   if (!game) return;
   for (const c of game.sched.controllers) if (c && c.dispose) c.dispose();
+  // 玩家接管期间 AI 不在控制器列表里：同样关掉（撤销在途请求，晚到的回复不再计入这局）
+  if (game.playerAI && game.playerAI.dispose) game.playerAI.dispose();
   if (game.minimap && game.minimap.dispose) game.minimap.dispose();
   if (game.replay) game.replay.bar.dispose();
   game.offs.forEach((f) => f());

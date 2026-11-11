@@ -11,21 +11,27 @@ import { canonicalJSON } from '../src/core/hash.js';
 import { rankActors } from '../src/core/scoring.js';
 import { RECORD_VERSIONS } from '../src/record/recorder.js';
 import { replay, ReplayMismatch } from '../src/record/replayer.js';
+import { OUTCOME_TYPES } from '../src/ai/decision-protocol.js';
 import { HttpError } from './http.mjs';
 
 export const RULES_VERSION = DEFAULT_CONFIG.rulesVersion;
-/** 本服务器能校验的规则版本：当前版本 + 旧版本（旧配置冻结在 src/config/legacy.js）。 */
+/**
+ * 本服务器能校验的规则版本：当前版本 + 旧版本 SPEC-0.1（旧配置冻结在 src/config/legacy.js）。
+ * SPEC-0.2（批次 6 – 2026-11-10，大模型决策 +2 回合生效）按用户裁定作废：不再认可，再次上传判为 unverifiable；已入库的行不删。
+ */
 export const SUPPORTED_RULES = Object.freeze([RULES_VERSION, 'SPEC-0.1']);
 const SEATS = DEFAULT_CONFIG.spawns.length;
 
 /**
  * 服务器认可的配置（configHash 覆盖整份配置）：
- *   当前版本（SPEC-0.2，批次 6 起）：玩家通道 × 地图规格，视野全公开
+ *   当前版本（SPEC-0.3，2026-11-10 起）：玩家通道 × 地图规格，视野全公开，大模型决策零缓冲
  *   SPEC-0.1：玩家通道 × 地图规格 × 当时的视野规则（radius 默认 / full · delayed · radar 实验），按冻结快照重建，逐字节一致
  */
 const KNOWN = knownConfigs();
 const MAX_TURNS = Math.max(...[...KNOWN.values()].map((k) => k.cfg.rules.maxTurns));
-const MAX_LINES = MAX_TURNS * 6 + 8;
+// v3 起每个决策还有若干 outcome 行；字节数另有 1 MiB 上限（api/matches.mjs），这里只防行数爆炸
+const MAX_LINES = MAX_TURNS * 12 + 8;
+const OUTCOMES = new Set(OUTCOME_TYPES);
 
 const HEX8 = /^[0-9a-f]{8}$/;
 const INTENTS = new RegExp(`^[NESW.\\-]{${SEATS}}$`);
@@ -150,6 +156,13 @@ export function parseRecord(text) {
       turnCount++;
     } else if (L.t === 'plan') {
       if (!isInt(L.n) || !isInt(L.seat) || L.seat < 0 || L.seat >= SEATS) throw bad(`第 ${k + 1} 行 plan 字段不合法`);
+      if ((L.dp !== undefined && !isInt(L.dp)) || (L.rev !== undefined && !isInt(L.rev))) throw bad(`第 ${k + 1} 行 plan.dp / rev 不合法`);
+    } else if (L.t === 'outcome') {
+      // v3 决策结果事件（§14 C9）：自报的复盘信息，不影响校验结论；只做形状检查
+      if (meta.v < 3) throw bad(`第 ${k + 1} 行：v${meta.v} 记录不该有 outcome 行`);
+      if (!isInt(L.seat) || L.seat < 0 || L.seat >= SEATS || !isInt(L.dp) || L.dp < 1 || !isInt(L.k) || L.k < 0 || L.k > MAX_TURNS || !OUTCOMES.has(L.type)) {
+        throw bad(`第 ${k + 1} 行 outcome 字段不合法`);
+      }
     } else if (L.t === 'end') {
       if (!isInt(L.n)) throw bad('end.n');
       checkRanking(L.ranking);

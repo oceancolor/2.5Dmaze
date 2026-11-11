@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 体积门禁（04 K11 / K12 / K14）。接在 npm test 链上：超预算 → 退出码 1 → npm test 失败。
-//   K11 静态资源总量 ≤ 4 MB（不含场外图集；场外图集单独 ≤ 10 MB，2026-11-09 用户裁定），其中 JS ≤ 600 KB（SPEC U5：由 300 KB 翻倍，用户裁定）、图集 ≤ 3.0 MB（03 v1.5：由 2.5 MB 上调 20%，用户裁定）、字体 ≤ 200 KB
-//   K12 首屏 ≤ 1.2 MB：入口页 + 样式 + 全部运行时 JS + 1× 地图图集（@2x 与场外 env 图集为非首屏，后台补拉）
+//   K11 静态资源总量 ≤ 4 MB（不含场外图集；场外图集单独 ≤ 10 MB，2026-11-09 用户裁定），其中 JS ≤ 1 MB（2026-11-10 用户裁定：由 600 KB 上调；更早 SPEC U5 由 300 KB 翻倍到 600 KB）、图集 ≤ 3.0 MB（03 v1.5：由 2.5 MB 上调 20%，用户裁定）、字体 ≤ 200 KB
+//   K12 首屏 ≤ 2 MB（2026-11-10 用户裁定：由 1.2 MB 上调）：入口页 + 样式 + 全部运行时 JS + 1× 地图图集（@2x 与场外 env 图集为非首屏，后台补拉）
 // 运行时 = 浏览器会加载的文件：index.html、src/**（.js / .css）、assets/**。tools/ tests/ docs/ proxy/ 不计。
 
 import { readdir, stat } from 'node:fs/promises';
@@ -13,13 +13,14 @@ const MB = 1024 * 1024;
 
 // 2026-11-09 美术批次（用户裁定）：场外图集（env / env@2x，非首屏、后台补拉、到货后才画）单独一档，上限 10 MB；
 // total 不含场外图集，仍是原来的 4 MB；地图图集（pilot）3.0 MB 不变。
+// 2026-11-10（用户裁定，决策协议改造）：JS 600 KB → 1 MB，首屏 1.2 MB → 2 MB；其余不变。
 export const BUDGETS = Object.freeze({
   total: 4 * MB,
-  js: 600 * KB,
+  js: 1 * MB,
   atlas: 3.0 * MB,
   env: 10 * MB,
   font: 200 * KB,
-  firstScreen: 1.2 * MB,
+  firstScreen: 2 * MB,
 });
 
 /** 文件分类：js | css | html | atlas | atlasFirst | env | font | other。 */

@@ -1,8 +1,10 @@
 // 模式 B 的「导出 AI 对话」：结算卡按钮（客户端内存里收集的调用）与战绩里的「下载对话」（服务器对话日志，talkEntryFromLog）同一格式。
 // 纯函数，不碰 DOM。格式 JSONL：
 //   {t:'meta', matchId, seed, mapSize, provider, model, autonomy, safetyGate, strategy, calls, exportedAt, source?}
-//   {t:'call', id, at?, kind, requestTurn, appliedTurn, why, ok, ms, model, finish, usage, messages, reply, error}
-//   {t:'outcome', n, req, src, plan, err}     来自对局记录的 plan 行（llm / llm-repair / invalid / stale / failed）
+//   {t:'call', id, at?, kind, dp, rev, requestTurn, appliedTurn, why, ok, ms, model, finish, usage, messages, reply, error}
+//   {t:'outcome', n, req, dp, rev, src, plan, err}     来自对局记录的 plan 行（llm / llm-repair / invalid / stale / failed / queue / guard / abandon）
+//   {t:'result', dp, type, k, ...}                    来自对局记录 v3 的 outcome 行（决策结果事件，§14 C5）
+// dp = 决策点编号（同一决策点的修复重交 rev + 1）；k = 帧号（第 k 回合结束后）。
 // 不含 key（客户端本来就没有）和 keyId；思路原文是玩家自己写的，导出给自己看。
 
 /** 每局最多保留的调用条数（中转上限每局 1600 次，正常一局 40–70 次）。 */
@@ -14,6 +16,8 @@ export function talkEntry(i) {
     t: 'call',
     id: i.id ?? null,
     kind: i.kind,
+    dp: i.dp ?? null,
+    rev: i.rev ?? null,
     requestTurn: i.requestTurn ?? null,
     appliedTurn: i.appliedTurn ?? null,
     why: i.why ?? null,
@@ -47,6 +51,8 @@ export function talkEntryFromLog(e) {
     id: null,
     at: e.at ?? null,
     kind: e.kind,
+    dp: null,
+    rev: null,
     requestTurn: turn ? Number(turn[1]) : null,
     appliedTurn: null,
     why: why ? why[1] : null,
@@ -71,15 +77,19 @@ export function buildTalkExport({ meta, calls, recordJSONL, seat = 0, exportedAt
   const lines = [{ t: 'meta', ...meta, calls: calls.length, exportedAt }];
   for (const c of calls) lines.push(c);
   for (const raw of String(recordJSONL || '').split('\n')) {
-    if (!raw.includes('"plan"')) continue;
+    if (!raw.includes('"plan"') && !raw.includes('"outcome"')) continue;
     let L;
     try {
       L = JSON.parse(raw);
     } catch {
       continue;
     }
-    if (L.t !== 'plan' || L.seat !== seat) continue;
-    lines.push({ t: 'outcome', n: L.n, req: L.req ?? null, src: L.src, plan: L.plan ?? null, err: L.err ?? null });
+    if (L.seat !== seat) continue;
+    if (L.t === 'plan') lines.push({ t: 'outcome', n: L.n, req: L.req ?? null, dp: L.dp ?? null, rev: L.rev ?? 0, src: L.src, plan: L.plan ?? null, err: L.err ?? null });
+    else if (L.t === 'outcome') {
+      const { t, seat: _s, ...e } = L;
+      lines.push({ t: 'result', ...e });
+    }
   }
   return `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`;
 }

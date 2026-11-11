@@ -86,7 +86,7 @@ test('MCP 协议：initialize 协商版本；tools / prompts 列表；通知回 
     const note = await s.http('POST', '/mcp', { token: T, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
     assert.equal(note.status, 202);
     const tools = (await s.rpc(T, 'tools/list', {})).json.result.tools.map((t) => t.name);
-    assert.deepEqual(tools, ['maze_new_game', 'maze_decide', 'maze_observe', 'maze_query', 'maze_replay', 'maze_history']);
+    assert.deepEqual(tools, ['maze_new_game', 'maze_decide', 'maze_observe', 'maze_frames', 'maze_query', 'maze_replay', 'maze_history']);
     const pr = await s.rpc(T, 'prompts/get', { name: 'play_maze', arguments: { size: 'S', strategy: '先凑套' } });
     assert.match(pr.json.result.messages[0].content.text, /地图 S[\s\S]*maze_new_game[\s\S]*先凑套/);
     const batch = await s.http('POST', '/mcp', { token: T, body: [{ jsonrpc: '2.0', id: 1, method: 'ping' }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'nope' }] });
@@ -108,7 +108,7 @@ test('整局：开局 → 每个决策点 maze_decide → 结束；会话与备�
       let r = await s.tool(T, 'maze_new_game', { size: 'XS', opponents, strategy: '先凑套' });
       assert.equal(r.isError, false, r.text);
       assert.match(r.text, /决策契约[\s\S]*先凑套/);
-      assert.match(r.text, /决策点 #1/);
+      assert.match(r.text, /决策点 dp-1 · 局面是开局/);
       let gameId = null;
       let points = 0;
       let sawSession = false;
@@ -169,9 +169,9 @@ test('不合格决策：带着错误在同一决策点重问一次；参数错�
     const { gameId } = decisionFrom(r.text);
     const bad = await s.tool(T, 'maze_decide', { gameId, decision: { targetType: 'gem', reason: '没写坐标' } });
     assert.match(bad.text, /上一次提交不合格/);
-    assert.match(bad.text, /决策点 #1/);
+    assert.match(bad.text, /决策点 dp-1（第 2 次提交）/);
     const fixed = await s.tool(T, 'maze_decide', decisionFrom(bad.text));
-    assert.match(fixed.text, /决策点 #2|结束/);
+    assert.match(fixed.text, /决策点 dp-2|结束/);
     assert.equal((await s.tool(T, 'maze_new_game', { size: 'XXL' })).isError, true);
     assert.equal((await s.tool(T, 'maze_decide', { gameId: 'zz', decision: d0() })).isError, true);
     const q = await s.tool(T, 'maze_query', { gameId, from: { x: 2, y: 2 }, to: { x: 13, y: 13 } });

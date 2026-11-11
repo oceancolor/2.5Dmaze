@@ -20,7 +20,7 @@ import { BUDGET } from '../player/runtime/budget.js';
 import { MAPPINGS } from '../player/input.js';
 import { MAP_SIZES, MAP_SIZE_IDS, DEFAULT_MAP_SIZE, isMapSize, matchOverrides } from '../config/map-sizes.js';
 import { VISION_PRESETS, visionText } from '../config/vision-modes.js';
-import { makeConfig } from '../config/default.config.js';
+import { DEFAULT_CONFIG, makeConfig } from '../config/default.config.js';
 import { ACTOR_COLORS } from '../render/palette.js';
 import { esc, frame, SEAT_NAMES, THINK_ZH, tokensText } from './hud.js';
 
@@ -219,10 +219,13 @@ function historyView(r) {
     // 接大模型模式的对局：从服务器对话日志下载这局的全部请求 / 回复 + 每次决策的结局（2026-11-05 批次 1）
     const talk = tag.startsWith('byok:') ? `<button class="btn mini" data-a="histtalk" data-id="${esc(m.matchId)}" title="下载这局你的 AI 每次请求 / 回复与结局（JSONL，不含 key）">下载对话</button>` : '';
     const vis = m.vision && VISION_PRESETS[m.vision] ? VISION_PRESETS[m.vision].label.replace('（现行）', '') : '—';
-    return `<tr><td>${when(m.endedAt || m.receivedAt)}</td><td>${esc(m.seed)}</td><td>${m.turns}</td><td>${esc(m.mapSize || '—')} · ${esc(vis)}</td><td>${esc(channelOf(tag))}</td>
+    // 规则版本不是当前的（2026-11-10 起旧成绩作废）：只列出来，不算校验结果、不给回放（旧配置已不再认可）
+    const old = m.rulesVersion && m.rulesVersion !== DEFAULT_CONFIG.rulesVersion;
+    const verify = old ? `<b class="warn">旧规则</b> <span class="k">${esc(m.rulesVersion)}</span>` : VERIFY[m.verify] || esc(m.verify);
+    return `<tr${old ? ' class="old"' : ''}><td>${when(m.endedAt || m.receivedAt)}</td><td>${esc(m.seed)}</td><td>${m.turns}</td><td>${esc(m.mapSize || '—')} · ${esc(vis)}</td><td>${esc(channelOf(tag))}</td>
       <td>${me.place ?? '–'} 名 · ${me.score ?? '–'} 分 · ${esc(STATUS[me.status] || me.status || '')}</td>
-      <td title="${esc(m.verifyNote || '')}">${VERIFY[m.verify] || esc(m.verify)}</td>${anyByok ? `<td>${talk}</td>` : ''}
-      <td>${m.verify === 'verified' ? `<button class="btn mini" data-a="histreplay" data-id="${esc(m.matchId)}" title="在游戏画面里重新播一遍这局">回放</button>` : ''}</td></tr>`;
+      <td title="${esc(old ? '旧规则的对局已作废：不计入成绩，也不能回放' : m.verifyNote || '')}">${verify}</td>${anyByok ? `<td>${talk}</td>` : ''}
+      <td>${m.verify === 'verified' && !old ? `<button class="btn mini" data-a="histreplay" data-id="${esc(m.matchId)}" title="在游戏画面里重新播一遍这局">回放</button>` : ''}</td></tr>`;
   }).join('')}</table>${r.total > r.items.length ? `<p class="k">共 ${r.total} 局，显示最近 ${r.items.length} 局</p>` : ''}<p class="k" data-k="histnote"></p>`;
 }
 
@@ -727,9 +730,10 @@ v1 兼容：只有 decide 也行；obs.state + api.setState(≤16KB)、api.dista
     const msgs = buildMessages(buildPayload(m.map, obs, cfg), p.persona, cfg, {
       autonomy: p.autonomy, safetyGate: p.safetyGate !== false, memory: memText,
       context: { why: 'start', plan: null, budget: cfg.ai.normalSoftCapPerAgent },
+      trajectory: '### 上次决策以来\n（开局，还没有人行动）', // 与对局中首个决策点一致（decision-packet.packetText）
     });
     const chars = msgs.reduce((a, x) => a + x.content.length, 0);
-    return `<p class="k">种子 1 · 规格 ${esc(s.mapSize)} 的开局；约 ${chars} 字符。对局中每次决策的 user 消息前面还会加上「本局到目前为止」的会话。${memText ? '已含经验。' : (p.useMemory !== false ? '经验还没读取或为空（点上面的「读取经验」）。' : '')}</p>
+    return `<p class="k">种子 1 · 规格 ${esc(s.mapSize)} 的开局；约 ${chars} 字符。对局中之后每次决策的 user 消息前面还会加上「本局到目前为止」的会话和「上次决策以来」的逐回合记录（平均多几百到一千多字符）。${memText ? '已含经验。' : (p.useMemory !== false ? '经验还没读取或为空（点上面的「读取经验」）。' : '')}</p>
       ${msgs.map((x) => `<h4>${x.role}</h4><pre class="prompt">${esc(x.content)}</pre>`).join('')}
       <button class="btn mini" data-a="preview">重新生成</button>`;
   }

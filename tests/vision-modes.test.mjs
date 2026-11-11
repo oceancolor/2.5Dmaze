@@ -28,7 +28,7 @@ test('配置（批次 6）：默认就是全公开；旧 radius 规则的哈希�
   assert.equal(configHash(spec01Config('manual', 'XL', 'radius')), '7e19e5c6', '批次 6 之前 XL 手打的默认哈希（冻结快照）');
   assert.equal(configHash(spec01Config('script', 'XS', 'full')), '090728bb', '批次 2 实验里 XS 全公开的哈希');
   assert.notEqual(configHash(DEFAULT_CONFIG), '7e19e5c6');
-  assert.equal(DEFAULT_CONFIG.rulesVersion, 'SPEC-0.2');
+  assert.equal(DEFAULT_CONFIG.rulesVersion, 'SPEC-0.3');
   const hs = new Set(VISION_IDS.map((v) => configHash(cfgOf(v))));
   assert.equal(hs.size, 4);
   for (const v of VISION_IDS) assert.equal(visionIdOf(cfgOf(v)), v);
@@ -107,7 +107,14 @@ test('服务器：新版（全公开）与 SPEC-0.1 四种规则的记录都 ver
   const now = verifyRecord(play(cfgOf('full', 'S'), 'srv-now').toJSONL());
   assert.equal(now.verify, 'verified', now.verifyNote);
   assert.equal(now.vision, 'full');
-  assert.equal(now.meta.rulesVersion, 'SPEC-0.2');
+  assert.equal(now.meta.rulesVersion, 'SPEC-0.3');
+  // 2026-11-10 用户裁定旧成绩作废：SPEC-0.2（+2 回合生效）的记录不再认可
+  const lines = play(cfgOf('full', 'S'), 'srv-old').toJSONL().split('\n');
+  const meta = JSON.parse(lines[0]);
+  lines[0] = JSON.stringify({ ...meta, rulesVersion: 'SPEC-0.2' });
+  const old = verifyRecord(lines.join('\n'));
+  assert.equal(old.verify, 'unverifiable');
+  assert.match(old.verifyNote, /SPEC-0\.2/);
   for (const v of VISION_IDS) {
     const r = verifyRecord(play(spec01Config('script', 'S', v), `srv-${v}`).toJSONL());
     assert.equal(r.verify, 'verified', `${v}: ${r.verifyNote}`);

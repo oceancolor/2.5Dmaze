@@ -138,7 +138,14 @@ export function buildPayload(map, obs, cfg, extra = {}) {
   return p;
 }
 
-function rulesLines(payload, cfg) {
+/** 玩家侧决策时序一句话（§4 / §14 C1）：网页提示词与 MCP 规则说明共用。contract = 玩家自己的 AI（有 abandonIf）。 */
+export function timingRule(contract = true) {
+  return '每次轮到你决策时，会先给你一段「上次决定之后到现在的逐回合记录」，以及当前这一回合的完整局面与博弈事实表。'
+    + '你据此提交一个目标，它从下一回合起立即执行；直到下一次轮到你决策为止，不能中途改主意'
+    + (contract ? '（abandonIf 是两次决策之间唯一的自动止损：每个行动回合检查，触发即重新问你）。' : '。');
+}
+
+function rulesLines(payload, cfg, contract = false) {
   const T = cfg.treasure;
   return [
     `你在玩 ${cfg.maze.size}×${cfg.maze.size} 网格迷宫寻宝，控制座位 ${payload.self.seat} 的小机器人。四人同时行动，每回合各走一格。`,
@@ -147,8 +154,9 @@ function rulesLines(payload, cfg) {
     '- 只有到达自己的出口才算成绩，冠军在到达者中按分数决出。',
     `- 计分 = 宝石数×${T.gemScore} + 成套数×${T.setBonus}（成套 = 五色各一颗）+ 宝箱分。宝箱随机给 ${T.chest.scoreRange.join('–')} 分或 ${T.chest.staminaRange.join('–')} 体力。`,
     `- 场上宝石拿空后刷新下一代（最多 ${T.gemRespawnMax} 次）。${visionText(cfg)}；宝石 / 宝箱位置全公开。`,
+    `- 决策时序：${timingRule(contract)}`,
     '- 你只选目标，寻路由引擎完成。dist = 你到目标的最短步数，back = 目标到你出口的最短步数，rivalsNearer = 比你更近的对手座位。',
-    '- rivals[].exit 是对手的出口（公开）；events 是上一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新）。',
+    '- rivals[].exit 是对手的出口（公开）；局面里的 events 是刚结束那一回合的全场公开事件（谁在哪拿了宝石、开箱结果、到达、出局、刷新），更早的在「上次决策以来」里。',
     '- 博弈事实表（引擎算好，直接用，不要自己数格子）：gems[] / chest 的 race = 每个对手 {seat, dist 他到这里, back 这里到他出口, canReturn 他拿了还回得了家, needsColor 这是不是他凑套最缺的颜色}；'
       + 'lead = 最近一个拿得起的对手的步数 − 你的步数（正数 = 你领先几步，负数 = 你落后几步，null = 没人跟你抢）。'
       + 'rivals[] 的 spare = 体力 − 到他出口的步数（越小越可能马上回家），heading = 他最近几回合在靠近的目标（closedBy = 缩短了几步）。',
@@ -170,7 +178,7 @@ function systemPrompt(payload, persona, cfg) {
 
 /**
  * 玩家自己的 AI：05 §5.2 的固定顺序（局面在 user 消息里）。批次 6 起是决策契约 v2：
- *   可附 then（后续目标，≤ thenMax）、abandonIf（放弃条件，引擎每回合检查）、memo（留给下一次的自己）；
+ *   可附 then（后续目标，≤ thenMax）、abandonIf（放弃条件，引擎每个行动回合检查）、memo（留给下一次的自己）；
  *   system 里多一段「你以往对局的经验」（跨局长期记忆，玩家可查看 / 编辑 / 清空）。
  */
 function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true, memory = '' }) {
@@ -179,15 +187,15 @@ function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true, m
   const text = truncatePersona(strategy, cfg.ai.llm.promptSuffixMaxChars).trim() || '（玩家没有写思路：稳健均衡即可）';
   const mem = truncatePersona(memory, H.memoryMaxChars).trim();
   return [
-    ...rulesLines(payload, cfg),
+    ...rulesLines(payload, cfg, true),
     '## 决策契约（输出格式）',
     '只输出一行 JSON，不要任何解释：',
     '{"targetType":"gem|chest|exit","target":{"x":整数,"y":整数},"reason":"不超过 30 字","follow":"yes|partial|override","deviation":"follow 不是 yes 时必填，不超过 60 字",'
       + `"then":[{"targetType":…,"target":{…}}],"abandonIf":{"rivalLeadBy":整数},"memo":"不超过 ${H.memoMaxChars} 字"}`,
     '- target 必须是当前存在的宝石 / 宝箱坐标，或你自己的出口坐标。',
     '- follow：yes = 完全按玩家思路；partial = 思路没覆盖到、由你判断；override = 你偏离了玩家思路。',
-    `- then（可选，最多 ${H.thenMax} 个）：拿到 target 之后依次去的目标，引擎会直接接着走、不再问你（省一次决策）；某个目标到时已经没了就跳过。`,
-    '- abandonIf（可选）：rivalLeadBy = k 表示「只要有一个拿得起的对手比我离当前目标近 k 步以上就放弃」，引擎每回合检查，触发后立刻再问你。不写就不检查。',
+    `- then（可选，最多 ${H.thenMax} 个）：拿到 target 之后依次去的目标，引擎会直接接着走、不再问你（省一次决策）；某个目标到时已经没了就跳过。主目标被别人拿走或 abandonIf 触发时，整条 then 清空、重新问你。`,
+    '- abandonIf（可选）：两次决策之间唯一的自动止损。rivalLeadBy = k 表示「只要有一个能去目标再回家的可见对手比我离当前目标近 ≥ k 步就放弃」；引擎每个行动回合检查，触发后清空 then、立刻再问你。不写就不检查。',
     '- memo（可选）：写给下一次决策的自己，比如对手意图的判断、长线计划。下次会原样带回来。只有本局有效。',
     `## 你该多听玩家的：${a.label}`,
     a.clause,
@@ -201,23 +209,25 @@ function contractPrompt(payload, strategy, cfg, { autonomy, safetyGate = true, m
 
 /**
  * 规划请求的消息列表（OpenAI 兼容 chat 格式）。
- * @param {{autonomy?:string, safetyGate?:boolean, context?:object, session?:string, memory?:string}} [opts]
+ * @param {{autonomy?:string, safetyGate?:boolean, context?:object, session?:string, memory?:string, trajectory?:string}} [opts]
  *   有 autonomy = 玩家自己的 AI（决策契约 v2）。context：{why, plan, budget}，附在局面后面；
  *   session：本局到目前为止的决策与结局 + 上次的备忘（harness.sessionText）；memory：跨局经验。
+ *   trajectory：「上次决策以来」（decision-packet.trajectoryText，§14 C7），对手与玩家的 AI 都带，放在局面前面。
  *   都与思路文本无关（J06：思路不能改变 AI 看到的局面）。
  */
 export function buildMessages(payload, persona, cfg, opts = {}) {
+  const traj = opts.trajectory ? `${opts.trajectory}\n\n` : '';
   if (!opts.autonomy) {
     return [
       { role: 'system', content: systemPrompt(payload, persona, cfg) },
-      { role: 'user', content: `局面：${JSON.stringify(payload)}` },
+      { role: 'user', content: `${traj}局面：${JSON.stringify(payload)}` },
     ];
   }
   const ctx = opts.context ? `\n本次决策：${JSON.stringify(opts.context)}` : '';
   const session = opts.session ? `${opts.session}\n\n` : '';
   return [
     { role: 'system', content: contractPrompt(payload, persona, cfg, opts) },
-    { role: 'user', content: `${session}局面：${JSON.stringify(payload)}${ctx}` },
+    { role: 'user', content: `${session}${traj}局面：${JSON.stringify(payload)}${ctx}` },
   ];
 }
 

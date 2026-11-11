@@ -11,11 +11,15 @@ import { now } from './clock.js';
 
 export const PROXY_URL = 'http://127.0.0.1:8787';
 
-/** 玩家自己的 AI（planner 传了 autonomy）用决策契约 v2 的提示词（含本局会话与跨局经验）；对手 AI 用原来的。 */
-export function messagesFor(req, cfg) {
+/**
+ * 玩家自己的 AI（planner 传了 autonomy）用决策契约 v2 的提示词（含本局会话与跨局经验）；对手 AI 用原来的。
+ * 两者都带「上次决策以来」（req.trajectory，§14 C7）；o.trajectory = false 时不带（MCP 回包自己另外排版）。
+ */
+export function messagesFor(req, cfg, o = {}) {
+  const trajectory = o.trajectory === false ? undefined : req.trajectory;
   const opts = req.autonomy
-    ? { autonomy: req.autonomy, safetyGate: req.safetyGate, context: req.context, session: req.session, memory: req.memory }
-    : {};
+    ? { autonomy: req.autonomy, safetyGate: req.safetyGate, context: req.context, session: req.session, memory: req.memory, trajectory }
+    : { trajectory };
   return req.kind === 'repair'
     ? buildRepairMessages(req.payload, req.persona, cfg, req.raw, req.error, opts)
     : buildMessages(req.payload, req.persona, cfg, opts);
@@ -39,8 +43,23 @@ export function createMockTransport({ isFast = () => false, latency = [90, 420],
     }
     const h = Math.imul(req.id + 1, 2654435761) ^ Math.imul(req.seat + 7, 40503);
     const ms = latency[0] + ((h >>> 0) % (latency[1] - latency[0]));
-    setTimeout(() => reply.deliver(text), ms);
+    const timer = setTimeout(() => reply.deliver(text), ms);
+    if (reply.signal) reply.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
   };
+}
+
+/** planner 撤销（接管 / 换控制器 / 对局关闭）→ 中止本地这次网络请求；返回「是否已被撤销」的查询。 */
+function linkCancel(reply, ctl) {
+  let cancelled = false;
+  if (reply.signal) {
+    const onAbort = () => {
+      cancelled = true;
+      ctl.abort();
+    };
+    if (reply.signal.aborted) onAbort();
+    else reply.signal.addEventListener('abort', onAbort, { once: true });
+  }
+  return () => cancelled;
 }
 
 /**
@@ -53,6 +72,7 @@ export function createProxyTransport({ cfg, url = PROXY_URL, onCall = null }) {
     const messages = messagesFor(req, cfg);
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), L.timeoutMs);
+    const cancelled = linkCancel(reply, ctl);
     const t0 = now();
     const done = (info) => {
       clearTimeout(timer);
@@ -69,6 +89,10 @@ export function createProxyTransport({ cfg, url = PROXY_URL, onCall = null }) {
       signal: ctl.signal,
     })
       .then(async (r) => {
+        if (cancelled()) {
+          clearTimeout(timer);
+          return;
+        }
         if (r.status === 429 || r.status >= 500) {
           done({ ok: false, error: `HTTP ${r.status}` });
           reply.fail(r.status === 429 ? '429' : '5xx');
@@ -84,6 +108,8 @@ export function createProxyTransport({ cfg, url = PROXY_URL, onCall = null }) {
         reply.deliver(String(j.text ?? ''));
       })
       .catch((e) => {
+        clearTimeout(timer);
+        if (cancelled()) return;
         const timeout = e && e.name === 'AbortError';
         done({ ok: false, error: timeout ? '超时' : '不可达' });
         reply.fail(timeout ? 'timeout' : 'unreachable');
@@ -117,6 +143,7 @@ export function createRelayTransport({ cfg, call, keyId, matchId, thinking = DEF
   return (req, reply) => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const cancelled = linkCancel(reply, ctl);
     const t0 = now();
     // 答案本身的预算：契约 v2（可带 then / memo）给 contractMaxTokens；思考 token 由服务器按档位另加
     const answer = req.autonomy ? L.contractMaxTokens : L.maxOutputTokens;
@@ -125,12 +152,16 @@ export function createRelayTransport({ cfg, call, keyId, matchId, thinking = DEF
       max_tokens: req.kind === 'repair' ? Math.max(L.repairMaxTokens, answer) : answer, temperature: L.temperature,
     };
     // 导出对话用：本次请求的完整 messages 与触发信息（不含 key：客户端本来就没有 key）
-    const exchange = { id: req.id, requestTurn: req.requestTurn, appliedTurn: req.appliedTurn, why: req.why ?? null, messages: body.messages };
+    const exchange = { id: req.id, dp: req.dp, rev: req.rev, requestTurn: req.requestTurn, appliedTurn: req.appliedTurn, why: req.why ?? null, messages: body.messages };
     const done = (info) => {
       clearTimeout(timer);
       if (onCall) onCall({ seat: req.seat, kind: req.kind, source: 'relay', ms: Math.round(now() - t0), ...exchange, ...info });
     };
     call('POST', '/llm/v1/chat', body, { signal: ctl.signal }).then((r) => {
+      if (cancelled()) {
+        clearTimeout(timer);
+        return;
+      }
       if (r.status === 200 && r.json) {
         done({
           ok: true, usage: r.json.usage ?? null, model: r.json.model, finish: r.json.finish ?? null, text: String(r.json.text ?? ''),
