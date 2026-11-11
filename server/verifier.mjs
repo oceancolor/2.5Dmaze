@@ -17,14 +17,15 @@ import { HttpError } from './http.mjs';
 export const RULES_VERSION = DEFAULT_CONFIG.rulesVersion;
 /**
  * 本服务器能校验的规则版本：当前版本 + 旧版本 SPEC-0.1（旧配置冻结在 src/config/legacy.js）。
- * SPEC-0.2（批次 6 – 2026-11-10，大模型决策 +2 回合生效）按用户裁定作废：不再认可，再次上传判为 unverifiable；已入库的行不删。
+ * SPEC-0.2（批次 6 – 2026-11-10，大模型决策 +2 回合生效）、SPEC-0.3（2026-11-10 – 11-11，宝箱随机分 / 体力、无 wait）
+ * 按用户裁定作废：不再认可，再次上传判为 unverifiable；已入库的行不删。
  */
 export const SUPPORTED_RULES = Object.freeze([RULES_VERSION, 'SPEC-0.1']);
 const SEATS = DEFAULT_CONFIG.spawns.length;
 
 /**
  * 服务器认可的配置（configHash 覆盖整份配置）：
- *   当前版本（SPEC-0.3，2026-11-10 起）：玩家通道 × 地图规格，视野全公开，大模型决策零缓冲
+ *   当前版本（SPEC-0.4，2026-11-11 起）：玩家通道 × 地图规格，视野全公开，大模型决策零缓冲，宝箱固定 5 分
  *   SPEC-0.1：玩家通道 × 地图规格 × 当时的视野规则（radius 默认 / full · delayed · radar 实验），按冻结快照重建，逐字节一致
  */
 const KNOWN = knownConfigs();
@@ -82,8 +83,8 @@ function checkPlayers(p) {
   }
 }
 
-/** 计划行里不算「一次决策」的来源：目标队列推进、引擎安全覆盖、放弃条件触发（批次 6 harness）。 */
-const NON_DECISION = new Set(['queue', 'guard', 'abandon']);
+/** 计划行里不算「一次决策」的来源：目标队列推进、引擎安全覆盖、放弃条件触发（批次 6 harness）、等待结束（SPEC-0.4）。 */
+const NON_DECISION = new Set(['queue', 'guard', 'abandon', 'wake']);
 
 /** 计划行 → 每座位的决策统计（复盘 / 报告用；记录里自报，不影响校验结论）。 */
 export function planStats(lines) {

@@ -3,7 +3,7 @@
 //   init 预计算（我出口的距离场）、模块变量记忆（锁定目标，避免来回摇摆）、
 //   obs.events（目标被谁拿走、宝石刷新了）、对手模型（按对手到宝石的距离判断「抢不过」）、
 //   api.sim.step（下一步会不会和对手撞在同一格 / 对穿而白等一回合）。
-// 打法：优先补齐自己最缺的颜色凑成套；宝箱近而且体力偏低就先开；回不来的不去；体力只够回家就回家。
+// 打法：优先补齐自己最缺的颜色凑成套；宝箱只给分时按分数争（还可能给体力的规则下，体力偏低才先开）；回不来的不去；体力只够回家就回家。
 
 let N = 0;
 let R = null;
@@ -44,7 +44,13 @@ function pickTarget(obs, api) {
   }
   const ch = obs.chest;
   if (ch.present && affordable(me.stamina, ch.dist, exitField[ch.y * N + ch.x], 14)) {
-    const v = me.stamina < R.stamina * 0.6 ? 2.2 : 0.8;
+    // 宝箱只给分（规则 pScore = 1）：按分数算（缺色宝石按 3 算，宝箱 5 分更值钱），抢不过一样打折；
+    // 还可能给体力的规则下：体力偏低才值得先开
+    let v;
+    if (R.chest.pScore >= 1) {
+      v = (R.chest.scoreRange[0] + R.chest.scoreRange[1]) / 2;
+      if (rivalFaster(obs, api, ch.x, ch.y, ch.dist) >= 0) v *= 0.35;
+    } else v = me.stamina < R.stamina * 0.6 ? 2.2 : 0.8;
     const score = v / (ch.dist + 1);
     if (!best || score > best.score) best = { score, type: 'chest', x: ch.x, y: ch.y, note: '开宝箱' };
   }

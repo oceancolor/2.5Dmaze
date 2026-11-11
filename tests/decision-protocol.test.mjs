@@ -65,7 +65,9 @@ function chainNear(req, reply) {
 test('规划器指纹：大模型规划器（mock 回复）对局的录像冻结', () => {
   // 第 3 项冻结于改动前、证明结果事件只记录；第 4 项（SPEC-0.3 零缓冲）有意改变时序，这里换成零缓冲后的值。
   // 之后任何改动让这些值变化 = 改动了大模型座位的行为，须在提交里说明原因。
-  const want = [['XS', 5, null, '4532e77a35ad5b0f'], ['XS', 11, 'free', 'ed34f9c47b81292c'], ['M', 7, 'blend', '8c3e549bb6ccc8dc'], ['S', 3, 'strict', '6be4bd61d82dabdb']];
+  // 2026-11-11 SPEC-0.4 第 10.1 / 10.2 / 10.3 项：宝箱必给 5 分，各 AI 按 5 分估宝箱，目标被抢与刷新必问（规则变了，有意更新；代码不变由 invariants 的旧规则对照证明）。
+  // 10.4：新增配置键 ai.wait → 记录 meta 的 configHash 变了；mock 不会等待，去掉该键后与 10.3 的值逐字节相同（3068e52d… / ec805d99… / 52f13ed5… / 22b63e49…）。
+  const want = [['XS', 5, null, '79f147275c620f68'], ['XS', 11, 'free', 'f5c8623d04901ae4'], ['M', 7, 'blend', 'f0869e41ee3fc9fc'], ['S', 3, 'strict', 'd38cbebc5d1e8640']];
   // 第 6 项（录像 v3）只加了 outcome 行与 plan.dp / rev，行为不变：按 v2 的写法还原后，指纹必须与第 4 项冻结的相同
   const asV2 = (jsonl) => `${jsonl.trim().split('\n').map((l) => JSON.parse(l)).filter((L) => L.t !== 'outcome').map((L) => {
     if (L.t === 'meta') return JSON.stringify({ ...L, v: 2 });

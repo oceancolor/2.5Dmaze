@@ -1,13 +1,15 @@
 // docs/SPEC.md §14 —— config 键表的唯一来源。改数值须同步 SPEC。
 // 覆盖方式：makeConfig({ ...局部覆盖 })；未知键直接抛错（防拼写错误静默失效）。
 
+// SPEC-0.4（2026-11-11 WorkBuddy 实测第二轮，redesign §14 C15）：宝箱必给 5 分、不再给体力（pScore 1、scoreRange [5,5]）；
+//   大模型可选 wait / headHome；目标被抢与刷新必问。用户裁定 SPEC-0.3 成绩作废（数据库不删）。
 // SPEC-0.3（2026-11-10 决策协议改造，docs/maze-treasure-decision-flow-redesign.md §14）：大模型决策零缓冲 ——
 //   基于第 k 回合结算后的局面提交，计划从第 k+1 回合第一步执行（planLatencyTurns 2 → 0）；首个决策点在开局任何人行动之前。
 //   用户裁定旧成绩作废：SPEC-0.2 记录不再被认可（数据库不删），只有 SPEC-0.1 的冻结配置继续保留。
 // SPEC-0.2（2026-11-06 批次 6）：视野全公开 + 大模型 harness（博弈事实表 / 会话记忆 / 目标队列 / 思考档位）。
 // 旧版 SPEC-0.1 的完整配置冻结在 legacy.js（服务器校验旧记录用），这里可以按新方案改。
 const DEFAULTS = {
-  rulesVersion: 'SPEC-0.3',
+  rulesVersion: 'SPEC-0.4',
 
   match: { playerSeat: 0, playerMode: 'manual' }, // manual | prompt | script | byok（05 模式 B：接入玩家自己的大模型）
 
@@ -58,8 +60,10 @@ const DEFAULTS = {
     },
     chest: {
       count: 1,
-      pScore: 0.5,
-      scoreRange: [1, 5],
+      // SPEC-0.4（用户裁定）：必给 5 分、不给体力。结算仍先抽「分还是体力」再抽数值（随机数调用次数不变，后续刷新不错位）；
+      // staminaRange 保留只为结构不变（pScore 1 时永远不会用到）。
+      pScore: 1,
+      scoreRange: [5, 5],
       staminaRange: [25, 50],
       respawnTurns: 60,
       respawnMax: 2,
@@ -86,6 +90,9 @@ const DEFAULTS = {
     normalSoftCapPerAgent: 60,
     endgameBudgetPerAgent: 10,
     planLatencyTurns: 0, // SPEC-0.3：零缓冲（请求当回合就等回复，回复后用于这一步行动）
+    // SPEC-0.4（§14 C15）：大模型可选的等待动作 wait（原地等 1–maxTurns 回合）/ home（走到离出口 stopAt 步处再等，最多 maxTurns 回合）。
+    // 等待中不耗体力；到期或刷新时必问；每局累计等待 ≤ maxTotal 回合；剩余回合 ≤ 回家步数 + timeMargin 时引擎改为回出口。
+    wait: { maxTurns: 10, maxTotal: 40, stopAtMax: 3, timeMargin: 2 },
     heuristic: {
       returnMarginX10: 13,
       wProgress: 0.5,

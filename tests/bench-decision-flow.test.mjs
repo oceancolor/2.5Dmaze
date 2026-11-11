@@ -16,3 +16,11 @@ test('基准：现行规则（零缓冲）stale = 0；旧规则对照（延迟 2
   assert.ok(aware.allEnded);
   assert.equal(aware.outcomes.stale, 0);
 });
+
+test('基准：会等待的玩家策略（SPEC-0.4）真的会等、能打完、等待只在 woken 时结束', () => {
+  const r = summarize([1, 2, 3, 4, 5, 6].map((s) => benchGame('S', s, { mode: 'aware', player: 'waiter' })));
+  assert.ok(r.allEnded);
+  assert.ok(r.waitedPerGame > 0, `每局等待 ${r.waitedPerGame} 回合`);
+  assert.ok(r.outcomes.woken > 0);
+  assert.equal(r.me.escapeRate, 1, '等待不会把自己等出局');
+});

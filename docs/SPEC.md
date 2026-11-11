@@ -1,6 +1,7 @@
 # 迷宫寻宝博弈 · 实现规格（SPEC）
 
-> 版本 **SPEC-0.3** · 2026-11-10（决策协议改造：大模型决策零缓冲 —— 基于第 k 回合结算后的局面提交、从第 k+1 回合起执行，首个决策点在开局；决策回包带「上次决策以来」的逐回合轨迹与结果事件；记录 v3。见 §7.5、§12 与 `docs/maze-treasure-decision-flow-redesign.md` §14。SPEC-0.2 的成绩按用户裁定作废）
+> 版本 **SPEC-0.4** · 2026-11-11（WorkBuddy 实测第二轮：宝箱固定 5 分、不给体力；目标被抢与刷新必问（刷新遇冷却推迟、不丢）；大模型可选等待动作 wait / home。见 §3.3、§7.5 与 redesign §14 C15。SPEC-0.3 的成绩按用户裁定作废）
+> SPEC-0.3 · 2026-11-10（决策协议改造：大模型决策零缓冲 —— 基于第 k 回合结算后的局面提交、从第 k+1 回合起执行，首个决策点在开局；决策回包带「上次决策以来」的逐回合轨迹与结果事件；记录 v3。见 §7.5、§12 与 `docs/maze-treasure-decision-flow-redesign.md` §14。SPEC-0.2 的成绩按用户裁定作废）
 > SPEC-0.2 · 2026-11-06（批次 6：对手位置全公开；接入大模型改为 harness —— 博弈事实表、本局会话、跨局经验、目标队列 / 放弃条件、思考档位，见 §6.1、§7.7 与 docs/05 §7.6–§7.9）
 > SPEC-0.1 · 2026-10-25（同日阶段 1 实现后回填：标定值、随机流、记录格式、启发式让行、基线数据，见附录 B）；其配置冻结在 `src/config/legacy.js`，旧记录照常校验
 >
@@ -147,12 +148,10 @@ setBonus = 5     // n_c = 该角色已拾取的 c 色宝石数
 - 另一种等价说法：每凑齐一套（五色各 1 颗），这一套按双倍计分。
 - 理论上限：15 颗 + 5 × 3 套 + 宝箱 3 × 5 分 = 45。
 
-### 3.3 宝箱 【沿用】
+### 3.3 宝箱 【定】SPEC-0.4（2026-11-11 用户裁定）
 
-- 全场 1 个。开启时掷骰：
-  - 50% → +1~5 分；
-  - 50% → +25~50 体力。
-  - 两个区间都是均匀分布，用 `chest` 随机流。
+- 全场 1 个。开启固定 **+5 分**，不给体力（`pScore = 1`、`scoreRange = [5, 5]`）。结算仍先抽「分还是体力」再抽数值，随机流调用次数与旧规则相同。
+- SPEC-0.3 及以前：50% → +1~5 分；50% → +25~50 体力（均匀分布，`chest` 随机流）。
 - 第 t 回合被开启 → 最早在第 t+60 回合的第 7 阶段重生；最多重生 2 次。
 - 重生位置距每个在场角色 BFS ≥ **30**，其余约束同撒点。
 
@@ -311,6 +310,8 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 - 超过 `timeoutMs`（本地代理 8000；中转按思考档位）→ repair 一次 → 仍失败降级；熔断（L3）立即解除等待。
 - 每个决策点有编号 `dp`（修复重交沿用、`rev + 1`）；结果以事件流记录（applied / invalid / failed / stale / cancelled / guard / abandoned / lost / reached / queued / replaced / continued / interrupted，见 redesign §14 C5、C14）。零缓冲下 `stale` 应为 0。
 - 被问到时可回 `{"keep":true}` 续走当前计划（目标 / then / abandonIf 原样保留，记 `continued`）；交同一目标也记 `continued`，换目标才记 `replaced`。规则正文如实列出何时会被问（含与目标无关的事件）与平局规则（分数 > 剩余体力 > 到达回合）。2026-11-11 起复盘里的「白跑」为净绕路（扣除顺路向出口的步数）。
+- SPEC-0.4：目标被抢、宝石 / 宝箱刷新**必问**（不占每局事件次数；目标被抢下一回合就问；刷新遇 3 回合冷却则推迟到冷却结束，期间被别的原因问过就算问过）；对手接近 / 受阻 / 体力终盘仍受冷却与次数限制、不补问。额度充足时大模型座位不再由启发式代走。
+- SPEC-0.4 等待动作：`{"targetType":"wait","turns":1–10}` 原地等；`{"targetType":"home","stopAt":1–3}` 走到离出口 stopAt 步处再等（最多 10 回合，不进出口）。原地等不耗体力；等满到期必问（`woken expired`，`then` 有下一个则接着走）；刷新叫醒必问（`woken refresh`，回 keep 接着等）；等待中其他事件与定期都不问；每局累计 ≤ 40 回合；剩余回合 ≤ 回家步数 + 2 时引擎改回出口（`guard cause time`）。配置 `ai.wait`。录像仍记原地不动，严格回放不变。
 - 决策回包 / 提示词带「上次决策以来」：上一个决策点之后到本次的逐回合轨迹 + 上次决策的结果事件（与 MCP 同一个 `src/ai/decision-packet.js`）。
 - 回放只读记录、不调模型，所以对局结果与倍速、网络快慢无关。内核里没有墙钟窗口，等待和超时看门狗放在内核外层。
 - SPEC-0.2 及以前为 `L = 2`（第 t 回合请求、第 t+2 回合生效，期间沿用旧计划），只为旧配置保留。
@@ -345,7 +346,7 @@ movers = { i | dir_i ≠ STAY }，t_i = p_i + dir_i
 2. **候选**：在场宝石 + 宝箱。可负担条件：`s ≥ d(me,t) + ceil(1.3 × d(t,exit))`，即回程留 30% 余量（取旧 bench-match 口径）。
 3. **价值**：
    - 宝石 `v = 1 + 5·Δsets + w_progress·[n_c == min]`；
-   - 宝箱 `v = w_chest(s)`；
+   - 宝箱 `v = w_chest(s)`；SPEC-0.4 起宝箱只给分，`v = 宝箱分数（5）`，与宝石同口径（`scoring.chestFixedScore`）；
    - 评分 `v / (d + 1)`，平分时按 `(y, x)` 升序取。
 4. **移动**：沿目标 BFS 距离场下降的方向走；有多个等价方向时，用 `ai` 随机流选（避免旧实现的方向偏置）。
 5. **解锁**（U4a 之后必需；阶段 1 仿真暴露了两种对称死锁，规则据此改写）：有移动意图却连续 `unblockAfter = 2` 回合未位移时——
@@ -501,7 +502,7 @@ tests/     *.test.mjs（node --test）
 
 ```js
 {
-  rulesVersion: 'SPEC-0.3',   // 2026-11-10 决策协议改造（ai.planLatencyTurns 2 → 0）；SPEC-0.2 作废；SPEC-0.1 整份冻结在 src/config/legacy.js
+  rulesVersion: 'SPEC-0.4',   // 2026-11-11 宝箱固定 5 分 / 必问事件 / 等待动作；SPEC-0.3、0.2 作废；SPEC-0.1 整份冻结在 src/config/legacy.js
   match:    { playerSeat: 0, playerMode: 'manual' },          // manual | prompt | script | byok（§9.4 B）
   maze: {
     size: 128, wallDensityTarget: 0.355, wallDensityTol: 0.008,
@@ -524,7 +525,7 @@ tests/     *.test.mjs（node --test）
     placement: { minSeparation: 30, rejectTries: 30, restartMax: 4, fairMaxSpread: 0.35,
                  spawnExclusion: 3, exitExclusion: 2, fallbackSets: 64,
                  respawnSepSchedule: [30, 20, 10, 0] },        // 重生时最小间距逐级放宽（§3.4）
-    chest: { count: 1, pScore: 0.5, scoreRange: [1, 5], staminaRange: [25, 50],
+    chest: { count: 1, pScore: 1, scoreRange: [5, 5], staminaRange: [25, 50],   // SPEC-0.4：必给 5 分（staminaRange 不再用到）
              respawnTurns: 60, respawnMax: 2, respawnMinActorDist: 30 },
   },
   vision: { entityRadius: 9, terrainPatch: 15, rememberEntities: true,
@@ -538,6 +539,7 @@ tests/     *.test.mjs（node --test）
     maxCallsPerGame: 360, poolNormal: 240, poolEndgame: 120,
     normalSoftCapPerAgent: 60, endgameBudgetPerAgent: 10,
     planLatencyTurns: 0,       // SPEC-0.3 零缓冲（§7.5）；SPEC-0.2 及以前为 2
+    wait: { maxTurns: 10, maxTotal: 40, stopAtMax: 3, timeMargin: 2 },   // SPEC-0.4 等待动作（§7.5）
     heuristic: { returnMarginX10: 13, wProgress: 0.5, wChestLow: 1.2, wChestHigh: 0.6, chestLowStamina: 300,
                  unblockAfter: 2, detourMaxExtra: 12, detourCommitTurns: 12,          // 解锁与让行（§8.5）
                  yieldMaxTurns: 16, yieldEscalateAfter: 6, yieldPct: 50 },

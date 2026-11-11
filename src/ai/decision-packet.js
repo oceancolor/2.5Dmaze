@@ -17,6 +17,7 @@ export const SEATS_LEGEND = 'seats[i] = [x, y, 体力, 分数, 状态]（座位 
 
 const OPEN = new Set(['applied', 'queued', 'guard']);
 const CLOSE = new Set(['reached', 'lost', 'abandoned', 'replaced', 'continued', 'interrupted']);
+const closes = (e) => CLOSE.has(e.type) || (e.type === 'woken' && e.cause !== 'refresh');
 
 /**
  * 每帧「这一回合在执行哪个决策、去哪」：第 k 回合的那一步由 k 之前的结果事件决定（applied 在帧 a，第 a+1 回合起执行）。
@@ -29,7 +30,7 @@ export function aimsOf(outcomes) {
     for (const e of sorted) {
       if (e.k >= k) break;
       if (OPEN.has(e.type) && e.ref) cur = [e.dp, e.ref.type, e.ref.x, e.ref.y];
-      else if (CLOSE.has(e.type) && cur && cur[0] === e.dp) cur = null;
+      else if (closes(e) && cur && cur[0] === e.dp) cur = null;
     }
     return cur;
   };
@@ -79,6 +80,8 @@ export function buildPacket({ frames, seat, outcomes, from, to, colors = [], pre
 export function refLabel(ref, colors = []) {
   if (!ref) return '—';
   if (ref.type === 'exit') return `出口(${ref.x},${ref.y})`;
+  if (ref.type === 'wait') return `原地等待(${ref.x},${ref.y})`;
+  if (ref.type === 'home') return `出口附近等待(${ref.x},${ref.y})`;
   if (ref.type === 'chest') return `宝箱(${ref.x},${ref.y})`;
   const name = Number.isInteger(ref.c) ? colors[ref.c] : null;
   return `宝石·${COLOR_NAME[name] || name || '?'}(${ref.x},${ref.y})`;
@@ -94,10 +97,13 @@ export function outcomeLine(e, colors = []) {
       ? `${at(e.k)}${e.k === 0 ? '' : '结束后'}续走：去 ${r}`
       : `${at(e.k)}${e.k === 0 ? '' : '结束后'}提交：去 ${r}（第 ${e.effectiveTurn} 回合起执行）`;
     case 'continued': return `${at(e.k)}结束后由决策点 dp-${e.by} 续走（目标不变）`;
+    case 'woken': return `第 ${e.k} 回合${e.cause === 'refresh' ? '因刷新被叫醒' : e.cause === 'cap' ? '本局等待额度用完' : '等待到期'}（已原地等 ${e.waited} 回合）`;
     case 'queued': return `${at(e.k)}结束后按 then 接着去 ${r}`;
     case 'reached': return `第 ${e.k} 回合${e.ref && e.ref.type === 'exit' ? '到达出口' : `拿到 ${r}`}`;
     case 'lost': return `第 ${e.k} 回合 ${r} 被座位 ${e.by} 拿走（你还差 ${e.behind} 步）`;
-    case 'guard': return `${at(e.k)}结束后体力不够（去 ${e.dist} + 回 ${e.back} > 体力 ${e.stamina}），引擎改为回家`;
+    case 'guard': return e.cause === 'time'
+      ? `${at(e.k)}结束后只剩 ${e.left} 回合（回家要 ${e.distToExit} 步），引擎结束等待、改为回家`
+      : `${at(e.k)}结束后体力不够（去 ${e.dist} + 回 ${e.back} > 体力 ${e.stamina}），引擎改为回家`;
     case 'abandoned': return `${at(e.k)}结束后放弃：座位 ${e.seat} 比你近 ${e.lead} 步（条件 ≥ ${e.need}）`;
     case 'replaced': return `${at(e.k)}结束后被决策点 dp-${e.by} 换了目标`;
     case 'interrupted': return `${at(e.k)}被打断（${e.cause === 'takeover' ? '玩家接管' : e.cause}）`;
@@ -141,7 +147,7 @@ export function packetText(packet, { frames, seat, colors = [], framesRef = '末
     }
     for (const [d, list] of byDp) {
       const last = list[list.length - 1];
-      const open = OPEN.has(last.type);
+      const open = OPEN.has(last.type) || (last.type === 'woken' && last.cause === 'refresh');
       L.push(`上次决策 dp-${d}：${list.map((e) => outcomeLine(e, colors)).join(' → ')}${open ? ' → 仍在执行' : ''}`);
     }
   }

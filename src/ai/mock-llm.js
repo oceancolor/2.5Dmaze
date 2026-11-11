@@ -65,9 +65,11 @@ export function mockPlan(payload, personaText, { contract = false } = {}) {
   }
   const ch = payload.chest;
   if (ch.present && ok(ch.dist, ch.back)) {
-    let v = (me.stamina < 300 ? 1.2 : 0.6) * w.chestW;
+    // SPEC-0.4 宝箱只给分（载荷 chest.score）：和宝石同口径按分数估，「开箱」风格再加三成；旧规则沿用体力权重
+    const fixed = typeof ch.score === 'number';
+    let v = fixed ? ch.score * (w.chestW > 1 ? 1.3 : 1) : (me.stamina < 300 ? 1.2 : 0.6) * w.chestW;
     if (ch.rivalsNearer.length) v *= w.contest;
-    offer(v / (ch.dist + 1), { type: 'chest', x: ch.x, y: ch.y, reason: `宝箱 ${ch.dist} 步，${me.stamina < 300 ? '顺便补体力' : '碰碰运气'}` });
+    offer(v / (ch.dist + 1), { type: 'chest', x: ch.x, y: ch.y, reason: `宝箱 ${ch.dist} 步，${fixed ? `${ch.score} 分` : me.stamina < 300 ? '顺便补体力' : '碰碰运气'}` });
   }
   if (!best) return home('没有负担得起的宝物了，回出口');
   return out(best.type, best.x, best.y, best.reason);

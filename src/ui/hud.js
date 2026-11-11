@@ -26,7 +26,7 @@ const SOURCE_ZH = {
   script: '脚本', 'auto-home': '引擎接管 · 自动回家', manual: '已切回手动', 'script-error': '脚本异常 · 沿意图兜底', 'script-invalid': '返回值无效 · 沿意图兜底',
   'script-timeout': '超时 · 沿意图兜底', 'manual-pending': '等待切回手动',
 };
-const TARGET_ZH = { gem: '宝石', chest: '宝箱', exit: '出口', cell: '格子' };
+const TARGET_ZH = { gem: '宝石', chest: '宝箱', exit: '出口', cell: '格子', wait: '原地等待', home: '出口附近等待' };
 const FOLLOW_CHIP = { yes: 'ok', partial: 'warn', override: 'bad' };
 /** 连续多少次不合格亮黄灯（05 §4，agent.maxInvalidStreak）。 */
 const WARN_STREAK = 3;
@@ -177,7 +177,8 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
   function planText(st) {
     if (!st || !st.target) return '';
     const t = st.target;
-    return `${SOURCE_ZH[st.source] ?? st.source} → ${TARGET_ZH[t.type] ?? t.type} (${t.x}, ${t.y})${st.reason ? ` · ${esc(st.reason)}` : ''}`;
+    const w = st.wait && st.mode === 'wait' ? ` · 等待 ${st.wait.waited}/${st.wait.turns}` : '';
+    return `${SOURCE_ZH[st.source] ?? st.source} → ${TARGET_ZH[t.type] ?? t.type} (${t.x}, ${t.y})${w}${st.reason ? ` · ${esc(st.reason)}` : ''}`;
   }
 
   /** 遵循标签：引擎安全覆盖与 AI 偏离分开显示（05 §5.3）。 */
@@ -193,6 +194,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
     const dec = S.applied + S.invalid + S.rejected + (S.stale || 0) + S.failed;
     const u = player.usage;
     return `决策 ${dec}${st.autonomy ? ` · 偏离 ${S.follow.override} · 部分 ${S.follow.partial}` : ''} · 不合格 ${S.invalid + S.rejected} · 安全覆盖 ${S.guardPlans}`
+      + `${S.totalWaited ? ` · 等待 ${S.totalWaited} 回合` : ''}`
       + `${S.capped ? ' · 已到调用上限' : ''}${u && u.calls ? ` · token ${tokensText(u.in + u.out)}` : ''}`;
   }
 
@@ -319,7 +321,7 @@ export function createHud(root, { cfg, atlas, seats, actions }) {
         if (ast.invalidStreak < warnFloor) warnFloor = 0;
         warnStreak = ast.invalidStreak;
       }
-      const stKey = sts.map((x) => (x ? `${x.source}${x.thinking ? '+' : ''}${x.target ? `${x.target.x},${x.target.y}` : ''}` : '')).join('/');
+      const stKey = sts.map((x) => (x ? `${x.source}${x.thinking ? '+' : ''}${x.target ? `${x.target.x},${x.target.y}` : ''}${x.wait ? `w${x.wait.waited}` : ''}` : '')).join('/');
       const aKey = ast ? `${player.held}${ast.follow}${ast.invalidStreak}${warnFloor}${ast.l3}${ast.stats.applied}${ast.stats.invalid}${player.usage ? player.usage.calls : ''}` : '';
       const key = [s.turn, s.ended, sched.speed, sched.skipAnim, sched.paused, sched.spectating, follow, mapping, zoomIndex,
         waitMs > 600, quality, sched.waitingFor.join(','), stKey, aKey, poolStats ? `${poolStats.total}${poolStats.l3}` : ''].join('|');

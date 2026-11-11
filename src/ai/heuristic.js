@@ -4,7 +4,7 @@
 import { DX, DY, STAY } from '../core/geom.js';
 import { STREAM, createStream, subSeed, randInt } from '../core/rng.js';
 import { bfsField, fieldFrom } from '../core/nav/bfs.js';
-import { setsOf } from '../core/scoring.js';
+import { chestFixedScore, setsOf } from '../core/scoring.js';
 
 /** 回家 / 终盘区：stamina*10 <= dist*factorX10 */
 export const isHome = (stamina, dist, factorX10) => stamina * 10 <= dist * factorX10;
@@ -42,7 +42,9 @@ export function chooseTarget(map, obs, cfg) {
   }
   const ch = obs.chest;
   if (ch.present && isAffordable(me.stamina, ch.dist, exitField[ch.y * N + ch.x], H.returnMarginX10)) {
-    const v = me.stamina < H.chestLowStamina ? H.wChestLow : H.wChestHigh;
+    // SPEC-0.4 宝箱只给分：和宝石同口径（分数 / 距离）；旧规则（可能给体力）沿用体力高低两档权重
+    const fixed = chestFixedScore(T.chest);
+    const v = fixed !== null ? fixed : me.stamina < H.chestLowStamina ? H.wChestLow : H.wChestHigh;
     const score = v / (ch.dist + 1);
     if (better(score, ch.x, ch.y, best)) best = { score, type: 'chest', x: ch.x, y: ch.y };
   }

@@ -13,7 +13,7 @@ const mem = { yieldSeat: -1, yieldLeft: 0, avoid: null, avoidLeft: 0 };
 const HOME_X10 = 13; // 回家阈值：体力×10 ≤ 到出口距离×13
 const MARGIN_X10 = 13; // 可负担：体力 ≥ 去程 + 1.3 × 回程
 const W_PROGRESS = 0.5; // 补上「最少的那种颜色」的额外价值
-const W_CHEST_LOW = 1.2; // 体力低时宝箱价值（可能加体力）
+const W_CHEST_LOW = 1.2; // 宝箱还可能给体力的规则下：体力低时的宝箱价值（只给分时按分数估）
 const W_CHEST_HIGH = 0.6;
 const UNBLOCK_AFTER = 2;
 const DETOUR_MAX_EXTRA = 12;
@@ -54,7 +54,9 @@ function chooseTarget(obs) {
   }
   const ch = obs.chest;
   if (ch.present && affordable(me.stamina, ch.dist, exitField[ch.y * N + ch.x])) {
-    const score = (me.stamina < chestLow ? W_CHEST_LOW : W_CHEST_HIGH) / (ch.dist + 1);
+    // 宝箱只给分（规则 pScore = 1）就按分数和宝石同口径比；还可能给体力时，体力低更值得开
+    const v = R.chest.pScore >= 1 ? (R.chest.scoreRange[0] + R.chest.scoreRange[1]) / 2 : me.stamina < chestLow ? W_CHEST_LOW : W_CHEST_HIGH;
+    const score = v / (ch.dist + 1);
     if (better(score, ch.x, ch.y, best)) best = { score, type: 'chest', x: ch.x, y: ch.y, note: '开宝箱' };
   }
   return best ? { type: best.type, x: best.x, y: best.y, note: best.note } : home;

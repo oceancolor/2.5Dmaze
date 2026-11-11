@@ -22,7 +22,7 @@ const mem = { yieldSeat: -1, yieldLeft: 0, avoid: null, avoidLeft: 0 };
 const HOME_X10 = 13;
 const MARGIN_X10 = 13;
 const W_PROGRESS = 0.5;
-const W_CHEST_LOW = 1.2;
+const W_CHEST_LOW = 1.2; // 宝箱还可能给体力的规则下：体力低时的宝箱价值
 const W_CHEST_HIGH = 0.6;
 const LOSE = 0.12; // 抢不过：价值乘这个
 const TIE = 0.45; // 可能同时到：价值乘这个
@@ -133,7 +133,9 @@ function chooseTarget(obs, api) {
   const ch = obs.chest;
   if (ch.present && affordable(me.stamina, ch.dist, exitField[ch.y * N + ch.x])) {
     const f = threat(obs, api, { x: ch.x, y: ch.y }, ch.dist, knowns);
-    const score = ((me.stamina < chestLow ? W_CHEST_LOW : W_CHEST_HIGH) * f) / (ch.dist + 1);
+    // 宝箱只给分（规则 pScore = 1）就按分数和宝石同口径比；还可能给体力时，体力低更值得开
+    const v = R.chest.pScore >= 1 ? (R.chest.scoreRange[0] + R.chest.scoreRange[1]) / 2 : me.stamina < chestLow ? W_CHEST_LOW : W_CHEST_HIGH;
+    const score = (v * f) / (ch.dist + 1);
     if (better(score, ch.x, ch.y, best)) best = { score, type: 'chest', x: ch.x, y: ch.y, note: '开宝箱' };
   }
   return best ? { type: best.type, x: best.x, y: best.y, note: best.note } : home;

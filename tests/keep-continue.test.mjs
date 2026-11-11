@@ -46,11 +46,14 @@ test('规则正文：何时会被问（含与目标无关的事件、冷却 / �
   const A = cfg.ai;
   for (const [sys, contract] of [[buildMessages(p, '', cfg, { autonomy: 'free' })[0].content, true], [buildMessages(p, '', cfg)[0].content, false]]) {
     assert.match(sys, /什么时候会轮到你决策/);
-    assert.match(sys, new RegExp(`同一种事件 ${A.eventCooldownTurns} 回合内不重复，每局最多 ${A.eventBudgetPerAgent} 次`));
-    assert.match(sys, /宝石整批刷新或宝箱刷新；有对手进入你 9 格内/);
-    assert.match(sys, /这些事件与你的目标无关时也会问你——此时局面没变就回 keep/);
+    assert.match(sys, /你的目标被别人拿走（下一回合就问）/);
+    assert.match(sys, new RegExp(`宝石整批刷新或宝箱刷新（离上次因事件被问不足 ${A.eventCooldownTurns} 回合时推迟到满 ${A.eventCooldownTurns} 回合再问，不会丢`));
+    assert.match(sys, /回出口途中这些照样会问/);
+    assert.match(sys, new RegExp(`两次事件提问至少隔 ${A.eventCooldownTurns} 回合，这类事件每局最多问 ${A.eventBudgetPerAgent} 次；被冷却或次数挡住就不问、也不补问`));
+    assert.match(sys, /有对手进入你 9 格内/);
+    assert.match(sys, /刷新和这些事件与你的目标无关时也会问你——此时局面没变就回 keep/);
     assert.match(sys, new RegExp(`距上次被问满 ${A.replanInterval} 回合（终盘 ${A.replanIntervalEndgame}`));
-    assert.match(sys, /正在回出口时不定期问，但上面的事件照样会问/);
+    assert.match(sys, /正在回出口时不定期问。/);
     assert.match(sys, /先比分数，分数相同比剩余体力（多者在前），再相同比到达回合（早者在前）/);
     assert.match(sys, /\{"keep":true/);
     assert.doesNotMatch(sys, /不能中途改主意/);

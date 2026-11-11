@@ -3,7 +3,7 @@
 //
 //   决策点 dp     每座位从 1 递增；repair（上次提交不合格后的重交）沿用同一 dp，rev + 1
 //   目标身份 ref  宝石 {type:'gem', gen, x, y, c}（gen = 宝石代数）；宝箱 {type:'chest', spawn, x, y}（spawn = 本局第几只）；
-//                 出口 {type:'exit', x, y}。只在这一层推导，不进核心状态、不影响 stateHash
+//                 出口 {type:'exit', x, y}；等待 {type:'wait' | 'home', x, y}（等的那一格）。只在这一层推导，不进核心状态、不影响 stateHash
 //   结果事件      append-only，一个决策可以先后有多条（applied → guard → reached）；历史条目冻结，不回写
 //                 每条 {dp, type, k, ...原因参数}，k = 帧号（第 k 回合结算后的局面，见 decision-frames.js）
 
@@ -23,6 +23,7 @@ export const OUTCOME_TYPES = Object.freeze([
   'replaced', // 被下一次决策换了目标 {by}
   'continued', // 下一次决策续走了同一个目标（keep，或交了同一个目标）{by}；§14 C14
   'interrupted', // 执行中被打断（玩家接管 / 换控制器）{cause}
+  'woken', // 等待（wait / home）结束或被叫醒 {cause: 'expired' | 'refresh' | 'cap', waited}；expired / cap 结束这个决策，refresh 不结束（之后续走或换目标）
 ]);
 
 export const sameRef = (a, b) => Boolean(a && b) && a.type === b.type && a.x === b.x && a.y === b.y
@@ -57,7 +58,7 @@ export function createDecisionLog(map, seat) {
   /** 当前局面（最近一帧）里 (x,y) 上的目标实例 → ref；目标不存在时宝石不带 c。 */
   function ref(targetType, t) {
     const { x, y } = t;
-    if (targetType === 'exit') return { type: 'exit', x, y };
+    if (targetType === 'exit' || targetType === 'wait' || targetType === 'home') return { type: targetType, x, y }; // wait = 原地等的格；home = 停下来等的格
     if (targetType === 'chest') return { type: 'chest', spawn: chestSpawn, x, y };
     const g = frame ? frame.gems.find(([, gx, gy]) => gx === x && gy === y) : null;
     return { type: 'gem', gen: frame ? frame.gen : 0, x, y, ...(g ? { c: g[0] } : {}) };

@@ -25,12 +25,18 @@
 //            abandonIf 放弃条件（引擎每回合检查，触发记 src 'abandon' 并立刻重问）；
 //   自保闸门第一次改写某个计划时记 src 'guard'。这三种都不算「一次决策」（服务器 planStats 跳过）。
 //   跨局经验 memory 进 system 提示词（只读，由外层赛后让模型自己写 / 压缩）。
+//
+// 等待动作（SPEC-0.4，§14 C15，所有大模型座位）：wait = 原地等 turns 回合；home = 沿最短路走到离出口 stopAt 步处再等（最多 wait.maxTurns 回合）。
+//   生效时把「在哪等」定成具体格（plan.target）；在那一格上每回合原地不动（不耗体力），waited + 1；永远不踩进自己的出口。
+//   等满到期 → 结果 woken{expired}（记 plan 行 src 'wake'），then 有下一个就接着走，否则必问；本局累计等待满 maxTotal → woken{cap}。
+//   在等的时候：刷新必问（woken{refresh}，回 keep 继续等完）；对手接近 / 受阻 / 体力终盘 / 定期都不问。
+//   时间闸门：剩余回合 ≤ 回家步数 + timeMargin → 改回出口（guard{cause:'time'}）。旧规则配置没有 cfg.ai.wait → 等待判不合格。
 
 import { STREAM, createStream, subSeed } from '../core/rng.js';
 import { fieldFrom } from '../core/nav/bfs.js';
-import { cheb } from '../core/geom.js';
+import { DX, DY, STAY, cheb } from '../core/geom.js';
 import { chooseTarget, stepToward, isAffordable } from './heuristic.js';
-import { buildPayload, checkContract, parsePlan, validatePlan } from './codec.js';
+import { WAIT_TYPES, buildPayload, checkContract, parsePlan, validatePlan } from './codec.js';
 import { createTracker, sessionText } from './harness.js';
 import { createDecisionLog, sameRef } from './decision-protocol.js';
 import { buildPacket, trajectoryText } from './decision-packet.js';
@@ -137,13 +143,14 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   let lastEventTurn = -Infinity;
   let lastFailTurn = -Infinity;
   let eventsUsed = 0;
+  let refreshDue = false; // 刷新待问（SPEC-0.4：冷却中推迟，不丢）
   let invalidStreak = 0;
   let prev = null;
   let last = null;
   const log = [];
   const stats = {
     requests: 0, repairs: 0, applied: 0, invalid: 0, rejected: 0, stale: 0, failed: 0, timeouts: 0,
-    events: 0, eventsSkipped: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0, queued: 0, abandons: 0, kept: 0,
+    events: 0, eventsSkipped: 0, mustAsk: 0, refreshDeferred: 0, denied: 0, guard: 0, guardPlans: 0, capped: 0, queued: 0, abandons: 0, kept: 0,
   };
   const follow = { yes: 0, partial: 0, override: 0 };
   const deviations = [];
@@ -152,6 +159,41 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   let resume = false; // 玩家接管后交还：下一回合按当时局面重新问一次（why 'resume'）
   let disposed = false;
   let outTaken = 0; // 结果事件已写进录像的条数
+
+  // ── 等待动作（SPEC-0.4）──
+  const W = A.wait || null; // 旧规则配置没有 → 等待不合格
+  let totalWaited = 0; // 本局累计原地等待的回合数
+  const isWaitPlan = (p) => Boolean(p) && WAIT_TYPES.includes(p.targetType);
+  /** home 停下来等的格：从 (x,y) 沿回家最短路走（方向序 N E S W），直到离出口 ≤ s 步；本来就够近就是原地。 */
+  function stopCell(x, y, s) {
+    let i = y * N + x;
+    while (exitField[i] > s) {
+      let nxt = -1;
+      for (let d = 0; d < 4; d++) {
+        const nx = (i % N) + DX[d];
+        const ny = ((i / N) | 0) + DY[d];
+        if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+        const j = ny * N + nx;
+        if (exitField[j] >= 0 && exitField[j] === exitField[i] - 1) {
+          nxt = j;
+          break;
+        }
+      }
+      if (nxt < 0) break;
+      i = nxt;
+    }
+    return { x: i % N, y: (i / N) | 0 };
+  }
+  /** 等待规格 → 生效中的计划字段：在哪等（target）、等几回合（turns）、已等（waited）。 */
+  function materializeWait(spec, me) {
+    if (spec.targetType === 'wait') return { targetType: 'wait', turns: Math.min(spec.turns, W.maxTurns), target: { x: me.x, y: me.y }, waited: 0 };
+    const stopAt = Math.min(spec.stopAt, W.stopAtMax);
+    return { targetType: 'home', stopAt, turns: W.maxTurns, target: stopCell(me.x, me.y, stopAt), waited: 0 };
+  }
+  /** 计划行 / 会话里展示的等待计划（不带内部计数）。 */
+  const waitLine = (p) => ({ targetType: p.targetType, ...(p.targetType === 'wait' ? { turns: p.turns } : { stopAt: p.stopAt }), target: { ...p.target } });
+  /** 正在那一格上等（home 还在路上时不算）。 */
+  const waitingNow = (me) => isWaitPlan(plan) && !plan.guarded && me.x === plan.target.x && me.y === plan.target.y;
   // 「上次决策以来」（§14 C7）：上一个决策点之后收到的帧（调度器帧缓冲里冻结对象的引用）与上一个决策点
   let segment = [];
   let anchorK = -1;
@@ -230,6 +272,16 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       reject(text, '现在没有在执行的计划可以续走（keep），请给出 targetType + target');
       return;
     }
+    if (isWaitPlan(result)) {
+      if (!W) {
+        reject(text, '本局规则没有等待动作（wait / home），请给出宝石 / 宝箱 / 出口');
+        return;
+      }
+      if (totalWaited >= W.maxTotal) {
+        reject(text, `本局累计等待已满 ${W.maxTotal} 回合，不能再等，请给出宝石 / 宝箱 / 出口`);
+        return;
+      }
+    }
     if (contract) {
       const c = checkContract(result, autonomy);
       if (!c.ok) {
@@ -242,8 +294,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     pending.result = result;
   }
 
-  /** 当前计划能否续走：有计划，且目标在发请求时的局面里还在（出口总在）。 */
-  const keepable = (payload) => Boolean(plan && plan.target && (plan.targetType === 'exit' || validAtRequest(plan, payload)));
+  /** 当前计划能否续走：有计划，且目标在发请求时的局面里还在（出口 / 等待总在）。 */
+  const keepable = (payload) => Boolean(plan && plan.target && (plan.targetType === 'exit' || isWaitPlan(plan) || validAtRequest(plan, payload)));
 
   function fail(id, reason, detail) {
     if (!pending || pending.id !== id || pending.status !== 'out') return;
@@ -260,6 +312,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
 
   /** 计划在发请求时的局面里是否合法（生效时目标没了 = 过期，不算 AI 答错）。 */
   function validAtRequest(r, payload) {
+    if (isWaitPlan(r)) return true;
     const { x, y } = r.target;
     if (r.targetType === 'exit') return x === payload.self.exit.x && y === payload.self.exit.y;
     if (r.targetType === 'gem') return payload.gems.some((g) => g.x === x && g.y === y);
@@ -314,9 +367,11 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     if (p.status === 'done') {
       const v = validatePlan(p.result, obs);
       if (v.ok) {
-        const ref = dlog.ref(p.result.targetType, p.result.target);
+        // 等待：生效这一刻定下「在哪等、等几回合」
+        const result = isWaitPlan(p.result) ? { ...p.result, ...materializeWait(p.result, obs.self) } : p.result;
+        const ref = dlog.ref(result.targetType, result.target);
         drop(ref);
-        plan = { ...p.result, requestTurn: p.requestTurn, appliedTurn: turn, source, why: p.why, guarded: false, dp: p.dp };
+        plan = { ...result, requestTurn: p.requestTurn, appliedTurn: turn, source, why: p.why, guarded: false, dp: p.dp };
         dlog.push('applied', p.dp, k, { rev: p.rev, effectiveTurn: turn, ref });
         dlog.bind(p.dp, ref);
         stats.applied++;
@@ -330,7 +385,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
           queue = (plan.then || []).slice(0, H.thenMax);
           track(turn, p, plan.source, plan, obs);
         }
-        log.push({ ...entry, source: plan.source, plan: p.result });
+        log.push({ ...entry, source: plan.source, plan: isWaitPlan(p.result) ? { ...p.result, ...waitLine(plan) } : p.result });
         return;
       }
       if (validAtRequest(p.result, p.payload)) {
@@ -386,7 +441,7 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
 
   /** 放弃条件：有一个拿得起的对手比我离当前目标近 k 步以上。返回 {text, seat, lead, need} 或 null。 */
   function abandonWhy(obs) {
-    if (!plan || !plan.abandonIf || plan.targetType === 'exit' || plan.guarded) return null;
+    if (!plan || !plan.abandonIf || plan.targetType === 'exit' || isWaitPlan(plan) || plan.guarded) return null;
     const k = plan.abandonIf.rivalLeadBy;
     const t = plan.target;
     const f = fieldFrom(map, t.y * N + t.x);
@@ -406,7 +461,11 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
   function nextFromQueue(obs, turn) {
     while (queue.length) {
       const q = queue.shift();
-      const cand = { targetType: q.targetType, target: q.target };
+      let cand;
+      if (isWaitPlan(q)) {
+        if (!W || totalWaited >= W.maxTotal) continue;
+        cand = materializeWait(q, obs.self);
+      } else cand = { targetType: q.targetType, target: q.target };
       if (!validatePlan(cand, obs).ok) continue;
       const rest = queue.slice();
       const dp = plan ? plan.dp : undefined;
@@ -420,7 +479,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         dlog.bind(dp, ref);
       }
       stats.queued++;
-      const line = { targetType: cand.targetType, target: cand.target, reason: plan.reason, ...(rest.length ? { then: rest } : {}), ...(plan.abandonIf ? { abandonIf: plan.abandonIf } : {}) };
+      const head = isWaitPlan(cand) ? waitLine(cand) : { targetType: cand.targetType, target: cand.target };
+      const line = { ...head, reason: plan.reason, ...(rest.length ? { then: rest } : {}), ...(plan.abandonIf ? { abandonIf: plan.abandonIf } : {}) };
       log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'queue', plan: line, dp });
       track(turn, null, 'queue', line, obs, 'got');
       return true;
@@ -435,7 +495,13 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
     const left = pool.remaining(seat);
     return {
       why: null,
-      plan: plan ? { targetType: plan.targetType, target: plan.target, reason: plan.reason, turns: turn - plan.appliedTurn } : null,
+      plan: plan
+        ? {
+          targetType: plan.targetType, target: plan.target, reason: plan.reason, turns: turn - plan.appliedTurn,
+          ...(isWaitPlan(plan) ? { waited: plan.waited, waitTurns: plan.turns, ...(plan.guarded ? { guarded: 'time' } : {}) } : {}),
+        }
+        : null,
+      ...(W ? { waitLeft: Math.max(0, W.maxTotal - totalWaited) } : {}),
       budget: callCap > 0 ? Math.min(left, Math.max(0, callCap - stats.requests - stats.repairs)) : left,
     };
   }
@@ -506,6 +572,17 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
           hist.set(o.seat, h);
         }
       }
+      // 等待到期 / 本局等待额度用完（SPEC-0.4）：结束这个决策；then 有下一个就接着走，否则下面按「计划完成」必问
+      if (isWaitPlan(plan) && !plan.guarded && (plan.waited >= plan.turns || totalWaited >= W.maxTotal)) {
+        const cause = plan.waited >= plan.turns ? 'expired' : 'cap';
+        if (plan.dp && dlog.bound) {
+          dlog.push('woken', plan.dp, turn - 1, { cause, waited: plan.waited });
+          dlog.unbind();
+        }
+        log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'wake', plan: null, err: cause, dp: plan.dp });
+        if (tracker) tracker.wake(cause);
+        if (!(contract && nextFromQueue(obs, turn))) plan = null;
+      }
       let complete = !plan;
       let event = null;
       if (plan && plan.targetType !== 'exit' && !validatePlan(plan, obs).ok) {
@@ -533,7 +610,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         }
       }
       if (prev) {
-        if (!event && (obs.gemGeneration > prev.gen || (obs.chest.present && !prev.chest))) event = 'refresh';
+        // 刷新（SPEC-0.4 必问）：单独检测，挂起「待问」；冷却中就等冷却结束再问，期间任何一次提问都会把它消化掉
+        if (obs.gemGeneration > prev.gen || (obs.chest.present && !prev.chest)) refreshDue = true;
         if (!event && me.blockedStreak === A.heuristic.unblockAfter && prev.blocked < me.blockedStreak) event = 'blocked';
         if (!event && me.inEndgame && !prev.endgame) event = 'lowStamina';
         if (!event) {
@@ -546,20 +624,32 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         }
       }
       prev = { gen: obs.gemGeneration, chest: obs.chest.present, blocked: me.blockedStreak, endgame: me.inEndgame, vis };
+      // 正在那一格上等：对手接近 / 受阻 / 体力终盘都不问（这是玩家主动选的等），刷新照问
+      const waiting = waitingNow(me);
+      if (waiting && event !== 'targetLost') event = null;
       if (pending) return;
 
       const endgame = me.inEndgame;
       const interval = endgame ? A.replanIntervalEndgame : pool.pressure(seat) ? A.replanIntervalMax : A.replanInterval;
       let why = null;
+      const cooled = turn - lastEventTurn >= A.eventCooldownTurns;
+      // §14 C15（SPEC-0.4）：目标被抢、刷新必问 —— 不占每局事件次数；目标被抢连冷却也不看（只受「上次失败」的冷却，
+      // 防止连续失败时每回合重发）；刷新若在冷却中就推迟到冷却结束（refreshDue 一直挂着）。
+      // 对手接近 / 受阻 / 体力进终盘照旧：冷却中或次数用完就不问，也不补问。
       if (resume) why = 'resume';
       else if (abandoned) why = 'abandon';
       else if (complete && turn - lastFailTurn >= A.eventCooldownTurns) why = lastPlanTurn === -Infinity ? 'start' : 'complete';
+      else if (event === 'targetLost') {
+        if (turn - lastFailTurn >= A.eventCooldownTurns) why = 'targetLost';
+      } else if (refreshDue && cooled) why = 'refresh';
       else if (event) {
-        if (turn - lastEventTurn < A.eventCooldownTurns || eventsUsed >= A.eventBudgetPerAgent) stats.eventsSkipped++;
+        if (!cooled || eventsUsed >= A.eventBudgetPerAgent) stats.eventsSkipped++;
         else why = event;
       }
-      // 已在回家路上：间隔重规划只会再答一次「回出口」，省掉；宝物刷新 / 对手进视野等事件照常触发
-      const homing = plan && plan.targetType === 'exit';
+      if (!why && refreshDue && !cooled) stats.refreshDeferred++;
+      // 已在回家路上：间隔重规划只会再答一次「回出口」，省掉；目标被抢 / 刷新 / 其他事件照常触发。
+      // 等待（SPEC-0.4）：在等 / 往出口附近走 / 被时间闸门改回家，同样不定期问
+      const homing = plan && (plan.targetType === 'exit' || plan.targetType === 'home' || waiting || (isWaitPlan(plan) && plan.guarded));
       if (!why && !homing && turn - lastPlanTurn >= interval) why = 'interval';
       if (!why) return;
       resume = false;
@@ -571,7 +661,13 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         stats.denied++;
         return;
       }
-      if (why !== 'complete' && why !== 'interval' && why !== 'start' && why !== 'abandon' && why !== 'resume') {
+      refreshDue = false; // 这次提问给的就是最新局面，挂着的刷新算问过了
+      if (why === 'refresh' && waiting && plan.dp && dlog.bound) dlog.push('woken', plan.dp, turn - 1, { cause: 'refresh', waited: plan.waited });
+      if (why === 'targetLost' || why === 'refresh') {
+        lastEventTurn = turn; // 必问事件不占次数，但照样开启冷却（压住紧跟着的「对手接近」之类）
+        stats.events++;
+        stats.mustAsk++;
+      } else if (why !== 'complete' && why !== 'interval' && why !== 'start' && why !== 'abandon' && why !== 'resume') {
         eventsUsed++;
         lastEventTurn = turn;
         stats.events++;
@@ -600,7 +696,41 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
       let source = pool.l3 ? 'l3' : 'heuristic';
       if (!pool.l3 && planAlive(obs)) {
         const t = plan.target;
-        if (plan.targetType === 'exit') {
+        if (isWaitPlan(plan)) {
+          // 等待（SPEC-0.4）：时间闸门 —— 剩余回合 ≤ 回家步数 + 余量 → 结束等待、改回出口（只改写一次）
+          const left = obs.maxTurns - turn + 1;
+          if (!plan.guarded && left <= me.distToExit + W.timeMargin) {
+            plan.guarded = true;
+            stats.guardPlans++;
+            queue = [];
+            if (plan.dp) {
+              const ref = dlog.ref('exit', me.exit);
+              dlog.push('guard', plan.dp, turn - 1, { cause: 'time', left, distToExit: me.distToExit, waited: plan.waited, ref });
+              dlog.bind(plan.dp, ref);
+            }
+            if (contract) {
+              const line = { targetType: 'exit', target: { x: me.exit.x, y: me.exit.y }, reason: '剩余回合只够回家，引擎结束等待、改为回家' };
+              log.push({ n: turn, seat, requestTurn: turn, why: null, source: 'guard', plan: line, dp: plan.dp });
+              track(turn, null, 'guard', line, obs, 'guard');
+            }
+          }
+          if (plan.guarded) {
+            source = 'guard';
+            target = { type: 'exit', x: me.exit.x, y: me.exit.y };
+            mode = 'home';
+          } else if (me.x === t.x && me.y === t.y) {
+            // 就在等的那一格：原地不动（不耗体力），计一回合
+            plan.waited++;
+            totalWaited++;
+            last = { dir: STAY, mode: 'wait', target: { type: plan.targetType, x: t.x, y: t.y }, source: plan.source, reason: plan.source.startsWith('llm') ? plan.reason : '' };
+            return last;
+          } else {
+            // home 还在往那一格走（或被挤开了回去）
+            target = { type: plan.targetType, x: t.x, y: t.y };
+            mode = 'home';
+            source = plan.source;
+          }
+        } else if (plan.targetType === 'exit') {
           target = { type: 'exit', x: t.x, y: t.y };
           mode = 'home';
           source = plan.source;
@@ -637,7 +767,9 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         target = h.target;
         mode = h.mode;
       }
-      const dir = stepToward(map, obs, target, cfg, st, mem);
+      let dir = stepToward(map, obs, target, cfg, st, mem);
+      // home 往等待格走时绕路也不能踩进自己的出口（踩上就算到达，等待就没了）
+      if (mode === 'home' && target.type === 'home' && dir !== STAY && me.x + DX[dir] === me.exit.x && me.y + DY[dir] === me.exit.y) dir = STAY;
       last = { dir, mode, target, source, reason: source.startsWith('llm') ? plan.reason : '' };
       return last;
     },
@@ -670,7 +802,8 @@ export function createPlanner({ map, seat, cfg, seed, pool, persona = '', autono
         memo,
         queue: queue.length,
         abandonIf: plan && plan.abandonIf ? plan.abandonIf : null,
-        stats: { ...stats, eventsUsed, follow: { ...follow } },
+        wait: isWaitPlan(plan) && !plan.guarded ? { type: plan.targetType, waited: plan.waited, turns: plan.turns, total: totalWaited, max: W.maxTotal } : null,
+        stats: { ...stats, eventsUsed, totalWaited, follow: { ...follow } },
       };
     },
 

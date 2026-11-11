@@ -6,6 +6,14 @@ export function gemTotal(gems) {
   return s;
 }
 
+/**
+ * 宝箱只给分（SPEC-0.4：pScore = 1）时开一次的期望分；还可能给体力（旧规则）时返回 null。
+ * 启发式 AI / 内置脚本 / 模拟大模型据此给宝箱估值（§14 C15）：只给分 → 按分数与宝石同口径比较；否则沿用旧的体力权重。
+ */
+export function chestFixedScore(C) {
+  return C && C.pScore >= 1 ? (C.scoreRange[0] + C.scoreRange[1]) / 2 : null;
+}
+
 /** 成套数 = 各色持有数的最小值 */
 export function setsOf(gems) {
   if (!gems.length) return 0;

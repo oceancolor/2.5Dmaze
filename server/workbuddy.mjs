@@ -320,7 +320,7 @@ function replayText(tl, head, detail) {
 // ───────── 工具定义 ─────────
 
 const POINT = { type: 'object', properties: { x: { type: 'integer' }, y: { type: 'integer' } }, required: ['x', 'y'] };
-const TARGET = { type: 'string', enum: ['gem', 'chest', 'exit'] };
+const TARGETS = ['gem', 'chest', 'exit', 'wait', 'home'];
 const GAME_ARG = { type: 'string', description: '对局 id（只有一局进行中时可省略；有多局时必填）' };
 
 export const TOOLS = [
@@ -339,7 +339,7 @@ export const TOOLS = [
   },
   {
     name: 'maze_decide',
-    description: '提交当前决策点的决定：它从下一回合起立即执行，引擎跑到下一个决策点并返回新回包（或对局结果）。decision 就是决策契约里的 JSON 对象；局面没变、只想按原计划走时交 {keep:true}（目标 / then / abandonIf 原样保留）。带上 decisionPointId 防止误交给别的决策点；带上 submissionId 后，同一次提交重试会原样返回第一次的结果、不会重复推进。',
+    description: '提交当前决策点的决定：它从下一回合起立即执行，引擎跑到下一个决策点并返回新回包（或对局结果）。decision 就是决策契约里的 JSON 对象；局面没变、只想按原计划走时交 {keep:true}（目标 / then / abandonIf 原样保留）；不想拿东西时可以等：{targetType:"wait", turns} 或 {targetType:"home", stopAt}。带上 decisionPointId 防止误交给别的决策点；带上 submissionId 后，同一次提交重试会原样返回第一次的结果、不会重复推进。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -348,15 +348,21 @@ export const TOOLS = [
         submissionId: { type: 'string', description: '你为这次提交生成的 id（≤ 64 个字母数字 . _ : -）；网络重试时用同一个' },
         decision: {
           type: 'object',
-          description: '新目标：{targetType, target, reason, …}；或续走原计划：{keep: true, reason?, memo?}（目标 / then / abandonIf 原样保留）',
+          description: '新目标：{targetType, target, reason, …}；等待：{targetType:"wait", turns} / {targetType:"home", stopAt}；或续走原计划：{keep: true, reason?, memo?}（目标 / then / abandonIf 原样保留）',
           properties: {
-            keep: { type: 'boolean', description: 'true = 续走当前计划（局面没变、被与你目标无关的事件问到时用）；此时不用写 targetType / target' },
-            targetType: TARGET,
+            keep: { type: 'boolean', description: 'true = 续走当前计划（局面没变、被与你目标无关的事件问到时用；等待中被刷新叫醒时 = 接着等完）；此时不用写 targetType / target' },
+            targetType: { type: 'string', enum: TARGETS, description: 'gem / chest / exit 要写 target；wait = 原地等 turns 回合；home = 走到离出口 stopAt 步处再等（不进出口）' },
             target: POINT,
+            turns: { type: 'integer', minimum: 1, maximum: 10, description: 'wait 用：原地等几回合（默认 3）' },
+            stopAt: { type: 'integer', minimum: 1, maximum: 3, description: 'home 用：停在离自己出口还差几步的地方（默认 1）' },
             reason: { type: 'string', description: '不超过 30 字' },
             follow: { type: 'string', enum: ['yes', 'partial', 'override'], description: '是否照用户思路做（本模式可一律填 yes；省略 = yes）' },
             deviation: { type: 'string', description: 'follow 不是 yes 时说明偏离了思路的哪一条、为什么' },
-            then: { type: 'array', maxItems: 2, items: { type: 'object', properties: { targetType: TARGET, target: POINT }, required: ['targetType', 'target'] }, description: '拿到 target 后依次去的目标（≤ 2；已经没了的自动跳过）。主目标丢失或 abandonIf 触发时整条清空' },
+            then: {
+              type: 'array', maxItems: 2,
+              items: { type: 'object', properties: { targetType: { type: 'string', enum: TARGETS }, target: POINT, turns: { type: 'integer' }, stopAt: { type: 'integer' } }, required: ['targetType'] },
+              description: '拿到 target 后依次去的目标或等待（≤ 2；已经没了的自动跳过）。主目标丢失或 abandonIf 触发时整条清空',
+            },
             abandonIf: { type: 'object', properties: { rivalLeadBy: { type: 'integer', minimum: 0 } }, description: '某个能「去目标再回家」的可见对手比你离目标近 ≥ rivalLeadBy 步时放弃（清空 then）并立刻重新问你；每个行动回合检查' },
             memo: { type: 'string', description: '留给下一次决策的自己（≤ 300 字）' },
           },
@@ -462,7 +468,7 @@ function callTool(ctx, user, name, args = {}) {
       return pointText(g);
     }
     const d = args.decision;
-    if (!d || typeof d !== 'object') throw new ToolError('decision 必须是对象：{targetType, target:{x,y}, reason, then?, abandonIf?, memo?}，或续走 {keep:true, reason?, memo?}');
+    if (!d || typeof d !== 'object') throw new ToolError('decision 必须是对象：{targetType, target:{x,y}, reason, then?, abandonIf?, memo?}，等待 {targetType:"wait", turns} / {targetType:"home", stopAt}，或续走 {keep:true, reason?, memo?}');
     const p = g.pending;
     g.pending = null;
     p.reply.deliver(JSON.stringify(d));

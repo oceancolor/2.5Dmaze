@@ -26,6 +26,8 @@ export function targetLabel(e) {
   if (!e || !e.target) return '—';
   const { x, y } = e.target;
   if (e.targetType === 'exit') return '回出口';
+  if (e.targetType === 'wait') return `原地等待(${x},${y})`;
+  if (e.targetType === 'home') return `出口附近等待(${x},${y})`;
   if (e.targetType === 'chest') return `宝箱(${x},${y})`;
   return `宝石·${COLOR_NAME[e.color] || e.color || '?'}(${x},${y})`;
 }
@@ -46,6 +48,18 @@ export function outcomeText(e) {
 
 function outcomeCore(e) {
   const s = e.steps ?? 0;
+  if (e.targetType === 'wait' || e.targetType === 'home') {
+    const w = `原地等了 ${e.waited || 0} 回合${e.targetType === 'home' && s ? `（先走了 ${s} 步到出口附近）` : ''}`;
+    switch (e.outcome) {
+      case 'waited': return `${w}，${e.cause === 'cap' ? '本局等待额度用完' : '到期'}`;
+      case 'switched': return `${w}后改了主意`;
+      case 'guard': return `${w}，剩余回合只够回家，引擎结束等待`;
+      case 'open': return `${w}，对局结束`;
+      case null:
+      case undefined: return `正在等（${w}）`;
+      default: break;
+    }
+  }
   switch (e.outcome) {
     case 'got': return `拿到了（走了 ${s} 步）`;
     case 'lost': return `被座位 ${e.by} 先拿走（我还差 ${e.behind} 步，${wasteText(e)}）`;
@@ -116,13 +130,22 @@ export function createTracker(map, seat) {
     abandon(cause) {
       resolve('abandoned', { cause });
     },
+    /** 等待到期 / 本局等待额度用完（SPEC-0.4）：当前等待结束。 */
+    wake(cause) {
+      if (cur && (cur.targetType === 'wait' || cur.targetType === 'home')) resolve('waited', { cause });
+    },
     observe(obs) {
       const me = obs.self;
       lastTurn = Math.max(0, obs.turn - 1);
-      if (cur && lastPos && (me.x !== lastPos[0] || me.y !== lastPos[1])) cur.steps++;
+      const moved = Boolean(lastPos) && (me.x !== lastPos[0] || me.y !== lastPos[1]);
+      if (cur && moved) cur.steps++;
+      // 等待：上一回合就在等的那一格上没动 = 等了一回合
+      if (cur && lastPos && !moved && (cur.targetType === 'wait' || cur.targetType === 'home') && cur.target && me.x === cur.target.x && me.y === cur.target.y) {
+        cur.waited = (cur.waited || 0) + 1;
+      }
       lastPos = [me.x, me.y];
       if (Number.isInteger(me.distToExit) && me.distToExit >= 0) lastDist = me.distToExit;
-      if (!cur || !cur.target || cur.targetType === 'exit') return;
+      if (!cur || !cur.target || cur.targetType === 'exit' || cur.targetType === 'wait' || cur.targetType === 'home') return;
       const t = cur.target;
       for (const ev of obs.events || []) {
         if ((ev.type === 'pickup' || ev.type === 'chest') && ev.x === t.x && ev.y === t.y) {
@@ -308,6 +331,8 @@ export function timelineFromRecord(jsonl, cfg, seat = 0) {
         tr.start(e, L.src === 'guard' ? 'guard' : L.src === 'queue' ? 'got' : 'switched');
       } else if (L.src === 'abandon') {
         tr.abandon(L.err || '放弃条件触发');
+      } else if (L.src === 'wake') {
+        tr.wake(L.err || 'expired');
       } else {
         tr.note({ ...base, outcome: L.src, err: L.err ?? '', targetType: p ? p.targetType : null, target: p && p.target ? p.target : null, reason: p ? p.reason ?? '' : '' });
       }

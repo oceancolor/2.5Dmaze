@@ -54,27 +54,30 @@ test('旧规则（只用于校验旧记录）：只有切比雪夫 R 内的在�
 });
 
 test('记忆：视野外给出最后目击（含拾取/开箱广播）与经过回合数', () => {
-  const { map } = createMatch(3, CFG);
-  const track = [null, null, null, null];
+  // 全公开规则下「看不见」只出现在对手已离场、座位 0 还在场时；多跑几个种子保证覆盖到（2026-11-11 宝箱估值改后种子 3 不再出现）
   let checked = 0;
-  runMatch(3, CFG, {
-    onTurn(prev, res) {
-      const s = res.state;
-      if (s.actors[0].status !== 'active') return;
-      for (const e of res.events) {
-        if ((e.type === 'pickup' || e.type === 'chest') && e.seat !== 0) track[e.seat] = [e.x, e.y, prev.turn];
-      }
-      const o = observe(map, s, 0, CFG, { patch: false });
-      for (const e of o.actors) {
-        if (e.visible) { track[e.seat] = [e.x, e.y, prev.turn]; continue; }
-        const t = track[e.seat];
-        if (!t) { assert.equal(e.lastSeen, null); continue; }
-        assert.deepEqual([e.lastSeen.x, e.lastSeen.y], [t[0], t[1]]);
-        assert.equal(e.lastSeen.turnsSince, s.turn - t[2]);
-        checked++;
-      }
-    },
-  });
+  for (const seed of [3, 5, 7, 9, 11]) {
+    const { map } = createMatch(seed, CFG);
+    const track = [null, null, null, null];
+    runMatch(seed, CFG, {
+      onTurn(prev, res) {
+        const s = res.state;
+        if (s.actors[0].status !== 'active') return;
+        for (const e of res.events) {
+          if ((e.type === 'pickup' || e.type === 'chest') && e.seat !== 0) track[e.seat] = [e.x, e.y, prev.turn];
+        }
+        const o = observe(map, s, 0, CFG, { patch: false });
+        for (const e of o.actors) {
+          if (e.visible) { track[e.seat] = [e.x, e.y, prev.turn]; continue; }
+          const t = track[e.seat];
+          if (!t) { assert.equal(e.lastSeen, null); continue; }
+          assert.deepEqual([e.lastSeen.x, e.lastSeen.y], [t[0], t[1]]);
+          assert.equal(e.lastSeen.turnsSince, s.turn - t[2]);
+          checked++;
+        }
+      },
+    });
+  }
   assert.ok(checked > 0);
 });
 

@@ -36,8 +36,8 @@ function setup(cfg, seed, transport, { autonomy = null, seats = [0, 1, 2, 3] } =
   return { s, reqs };
 }
 
-test('配置：SPEC-0.3、规划延迟 0', () => {
-  assert.equal(XS.rulesVersion, 'SPEC-0.3');
+test('配置：规划延迟 0（SPEC-0.3 起；当前 SPEC-0.4）', () => {
+  assert.equal(XS.rulesVersion, 'SPEC-0.4');
   assert.equal(XS.ai.planLatencyTurns, 0);
 });
 
